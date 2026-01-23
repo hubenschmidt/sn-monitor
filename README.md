@@ -1,6 +1,6 @@
 # sn-monitor
 
-CLI tool that silently captures a selected monitor via hotkey and sends the screenshot to Claude Opus 4.5 (vision-capable) for solving code problems.
+CLI tool that silently captures a selected monitor via hotkey and pipes to Claude Opus 4.5
 
 ## Prerequisites
 
