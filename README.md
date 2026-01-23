@@ -14,7 +14,7 @@ CLI tool that silently captures a selected monitor via hotkey and sends the scre
    ```bash
    sudo usermod -aG input $USER
    ```
-   Log out and back in for this to take effect.
+   Log out and back in for this to take effect (or run `newgrp input` for the current session).
 
 2. Create your `.env` file:
    ```bash
@@ -32,5 +32,5 @@ go build -o sn-monitor .
 ## Usage
 
 1. The CLI lists available monitors with model names — select one by number
-2. Press **Ctrl+Alt+Space** to capture the selected monitor and get a solution
+2. Press **Left + Right arrow keys** simultaneously to capture and get a solution
 3. Press **Ctrl+C** to quit

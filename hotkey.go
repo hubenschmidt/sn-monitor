@@ -9,14 +9,11 @@ import (
 )
 
 const (
-	evKey        = 1
-	keyPress     = 1
-	keyRelease   = 0
-	keyLeftCtrl  = 29
-	keyRightCtrl = 97
-	keyLeftAlt   = 56
-	keyRightAlt  = 100
-	keySpace     = 57
+	evKey      = 1
+	keyPress   = 1
+	keyRelease = 0
+	keyLeft    = 105
+	keyRight   = 106
 )
 
 // inputEvent matches the Linux input_event struct on 64-bit.
@@ -130,8 +127,8 @@ func listenDevice(path string, ch chan<- struct{}) error {
 	defer f.Close()
 
 	buf := make([]byte, inputEventSize*64)
-	ctrlDown := false
-	altDown := false
+	leftDown := false
+	rightDown := false
 
 	for {
 		n, err := f.Read(buf)
@@ -143,31 +140,24 @@ func listenDevice(path string, ch chan<- struct{}) error {
 			if ev.Type != evKey {
 				continue
 			}
-
-			pressed := ev.Value == keyPress
-			released := ev.Value == keyRelease
-
 			switch ev.Code {
-			case keyLeftCtrl, keyRightCtrl:
-				if pressed {
-					ctrlDown = true
+			case keyLeft:
+				leftDown = ev.Value == keyPress
+				if ev.Value == keyRelease {
+					leftDown = false
 				}
-				if released {
-					ctrlDown = false
+			case keyRight:
+				rightDown = ev.Value == keyPress
+				if ev.Value == keyRelease {
+					rightDown = false
 				}
-			case keyLeftAlt, keyRightAlt:
-				if pressed {
-					altDown = true
-				}
-				if released {
-					altDown = false
-				}
-			case keySpace:
-				if pressed && ctrlDown && altDown {
-					select {
-					case ch <- struct{}{}:
-					default:
-					}
+			}
+			if leftDown && rightDown {
+				leftDown = false
+				rightDown = false
+				select {
+				case ch <- struct{}{}:
+				default:
 				}
 			}
 		}
