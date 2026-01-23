@@ -52,21 +52,25 @@ func main() {
 	}()
 
 	for range ch {
-		fmt.Println("capturing...")
-		pngData, err := captureMonitor(selected)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "capture error: %v\n", err)
-			continue
-		}
-		fmt.Println("solving...")
-		answer, err := solve(pngData)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "solve error: %v\n", err)
-			continue
-		}
-		fmt.Println(strings.Repeat("─", 60))
-		fmt.Println(answer)
-		fmt.Println(strings.Repeat("─", 60))
-		fmt.Println()
+		handleCapture(selected)
 	}
+}
+
+func handleCapture(monitorIdx int) {
+	fmt.Println("capturing...")
+	pngData, err := captureMonitor(monitorIdx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "capture error: %v\n", err)
+		return
+	}
+	fmt.Println("solving...")
+	answer, err := solve(pngData)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "solve error: %v\n", err)
+		return
+	}
+	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println(answer)
+	fmt.Println(strings.Repeat("─", 60))
+	fmt.Println()
 }

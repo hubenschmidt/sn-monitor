@@ -29,32 +29,38 @@ func listMonitors() ([]MonitorInfo, error) {
 
 	var monitors []MonitorInfo
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Monitors:") {
-			continue
+		m := parseMonitorLine(line, len(monitors), edidNames)
+		if m != nil {
+			monitors = append(monitors, *m)
 		}
-		parts := strings.Fields(line)
-		if len(parts) < 4 {
-			continue
-		}
-		idx := len(monitors)
-		output := parts[len(parts)-1]
-		geom := parts[2]
-		model := edidNames[output]
-		if model == "" {
-			model = "Unknown"
-		}
-		w, h, x, y := parseGeom(geom)
-		monitors = append(monitors, MonitorInfo{
-			Index: idx, Output: output, Model: model, Geom: geom,
-			X: x, Y: y, Width: w, Height: h,
-		})
 	}
 
 	if len(monitors) == 0 {
 		return nil, fmt.Errorf("no monitors detected")
 	}
 	return monitors, nil
+}
+
+func parseMonitorLine(line string, idx int, edidNames map[string]string) *MonitorInfo {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "Monitors:") {
+		return nil
+	}
+	parts := strings.Fields(line)
+	if len(parts) < 4 {
+		return nil
+	}
+	output := parts[len(parts)-1]
+	geom := parts[2]
+	model := edidNames[output]
+	if model == "" {
+		model = "Unknown"
+	}
+	w, h, x, y := parseGeom(geom)
+	return &MonitorInfo{
+		Index: idx, Output: output, Model: model, Geom: geom,
+		X: x, Y: y, Width: w, Height: h,
+	}
 }
 
 // parseGeom parses "2192/700x1233/400+1080+177" → w=2192, h=1233, x=1080, y=177
@@ -86,42 +92,44 @@ func readEDIDNames() map[string]string {
 	names := make(map[string]string)
 	cards, _ := filepath.Glob("/sys/class/drm/card*-*")
 	for _, cardPath := range cards {
-		edidPath := filepath.Join(cardPath, "edid")
-		data, err := os.ReadFile(edidPath)
-		if err != nil || len(data) < 128 {
-			continue
+		output, name := resolveEDID(cardPath)
+		if output != "" {
+			names[output] = name
 		}
-		name := parseEDIDName(data)
-		if name == "" {
-			continue
-		}
-		// card path like /sys/class/drm/card1-DP-4 → output "DP-4"
-		base := filepath.Base(cardPath)
-		idx := strings.Index(base, "-")
-		if idx < 0 {
-			continue
-		}
-		output := base[idx+1:]
-		names[output] = name
 	}
 	return names
 }
 
+func resolveEDID(cardPath string) (string, string) {
+	edidPath := filepath.Join(cardPath, "edid")
+	data, err := os.ReadFile(edidPath)
+	if err != nil || len(data) < 128 {
+		return "", ""
+	}
+	name := parseEDIDName(data)
+	if name == "" {
+		return "", ""
+	}
+	base := filepath.Base(cardPath)
+	idx := strings.Index(base, "-")
+	if idx < 0 {
+		return "", ""
+	}
+	return base[idx+1:], name
+}
+
 func parseEDIDName(data []byte) string {
-	// Descriptors start at byte 54, each 18 bytes, 4 descriptors in base block
 	for i := 0; i < 4; i++ {
 		offset := 54 + i*18
 		if offset+18 > len(data) {
-			break
+			return ""
 		}
 		desc := data[offset : offset+18]
-		// Monitor name descriptor: bytes 0-2 = 0x00, byte 3 = 0xFC
-		if desc[0] != 0 || desc[1] != 0 || desc[2] != 0 || desc[3] != 0xFC {
-			continue
+		if desc[0] == 0 && desc[1] == 0 && desc[2] == 0 && desc[3] == 0xFC {
+			raw := string(desc[5:18])
+			raw = strings.TrimRight(raw, "\n \x00\x0a")
+			return strings.TrimSpace(raw)
 		}
-		raw := string(desc[5:18])
-		raw = strings.TrimRight(raw, "\n \x00\x0a")
-		return strings.TrimSpace(raw)
 	}
 	return ""
 }

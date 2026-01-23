@@ -27,67 +27,6 @@ type inputEvent struct {
 
 var inputEventSize = int(unsafe.Sizeof(inputEvent{}))
 
-func findKeyboard() (string, error) {
-	matches, _ := filepath.Glob("/dev/input/event*")
-	for _, dev := range matches {
-		name, err := deviceName(dev)
-		if err != nil {
-			continue
-		}
-		lower := strings.ToLower(name)
-		if strings.Contains(lower, "keyboard") {
-			return dev, nil
-		}
-	}
-	// Fallback: try each device that supports EV_KEY
-	for _, dev := range matches {
-		if supportsEVKey(dev) {
-			return dev, nil
-		}
-	}
-	return "", fmt.Errorf("no keyboard found in /dev/input/")
-}
-
-func deviceName(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	buf := make([]byte, 256)
-	// EVIOCGNAME ioctl
-	const eviocgname = 0x80ff4506
-	_, _, err = ioctl(f.Fd(), eviocgname, uintptr(unsafe.Pointer(&buf[0])))
-	if err != nil {
-		return "", fmt.Errorf("ioctl: %v", err)
-	}
-	end := 0
-	for end < len(buf) && buf[end] != 0 {
-		end++
-	}
-	return string(buf[:end]), nil
-}
-
-func supportsEVKey(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	// EVIOCGBIT(0, ...) to get event type bits
-	var bits [4]byte
-	const eviocgbit = 0x80044520
-	_, _, errBit := ioctl(f.Fd(), eviocgbit, uintptr(unsafe.Pointer(&bits[0])))
-	if errBit != nil {
-		return false
-	}
-	// Check if EV_KEY (bit 1) is set
-	return bits[0]&(1<<evKey) != 0
-}
-
-// listenHotkey listens on all keyboard devices for Ctrl+Alt+Space.
 func listenHotkey(ch chan<- struct{}) error {
 	keyboards := findAllKeyboards()
 	if len(keyboards) == 0 {
@@ -108,15 +47,39 @@ func findAllKeyboards() []string {
 	matches, _ := filepath.Glob("/dev/input/event*")
 	var result []string
 	for _, dev := range matches {
-		name, err := deviceName(dev)
-		if err != nil {
-			continue
-		}
-		if strings.Contains(strings.ToLower(name), "keyboard") {
+		if isKeyboard(dev) {
 			result = append(result, dev)
 		}
 	}
 	return result
+}
+
+func isKeyboard(path string) bool {
+	name, err := deviceName(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(name), "keyboard")
+}
+
+func deviceName(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	buf := make([]byte, 256)
+	const eviocgname = 0x80ff4506
+	_, _, err = ioctl(f.Fd(), eviocgname, uintptr(unsafe.Pointer(&buf[0])))
+	if err != nil {
+		return "", fmt.Errorf("ioctl: %v", err)
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	return string(buf[:end]), nil
 }
 
 func listenDevice(path string, ch chan<- struct{}) error {
@@ -137,31 +100,31 @@ func listenDevice(path string, ch chan<- struct{}) error {
 		}
 		for i := 0; i+inputEventSize <= n; i += inputEventSize {
 			ev := (*inputEvent)(unsafe.Pointer(&buf[i]))
-			if ev.Type != evKey {
-				continue
-			}
-			switch ev.Code {
-			case keyLeft:
-				leftDown = ev.Value == keyPress
-				if ev.Value == keyRelease {
-					leftDown = false
-				}
-			case keyRight:
-				rightDown = ev.Value == keyPress
-				if ev.Value == keyRelease {
-					rightDown = false
-				}
-			}
-			if leftDown && rightDown {
-				leftDown = false
-				rightDown = false
-				select {
-				case ch <- struct{}{}:
-				default:
-				}
-			}
+			leftDown, rightDown = processEvent(ev, leftDown, rightDown, ch)
 		}
 	}
+}
+
+func processEvent(ev *inputEvent, leftDown, rightDown bool, ch chan<- struct{}) (bool, bool) {
+	if ev.Type != evKey {
+		return leftDown, rightDown
+	}
+
+	if ev.Code == keyLeft {
+		leftDown = ev.Value == keyPress
+	}
+	if ev.Code == keyRight {
+		rightDown = ev.Value == keyPress
+	}
+
+	if leftDown && rightDown {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+		return false, false
+	}
+	return leftDown, rightDown
 }
 
 func ioctl(fd uintptr, req uintptr, arg uintptr) (uintptr, uintptr, error) {
