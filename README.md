@@ -14,9 +14,14 @@ CLI tool that silently captures a selected monitor via hotkey and sends the scre
    ```bash
    sudo usermod -aG input $USER
    ```
-   Log out and back in for this to take effect (or run `newgrp input` for the current session).
+   Log out and back in for this to take effect.
 
-2. Create your `.env` file:
+2. If you don't want to log out, activate the group in your current shell:
+   ```bash
+   newgrp input
+   ```
+
+3. Create your `.env` file:
    ```bash
    cp .env.example .env
    # Edit .env and add your Anthropic API key
