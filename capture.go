@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"image/png"
+	"image/jpeg"
 
 	"github.com/kbinani/screenshot"
 )
@@ -21,8 +21,8 @@ func captureMonitor(index int) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		return nil, fmt.Errorf("png encode failed: %w", err)
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		return nil, fmt.Errorf("jpeg encode failed: %w", err)
 	}
 	return buf.Bytes(), nil
 }
