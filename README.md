@@ -34,6 +34,32 @@ go build -o sn-monitor .
 ./sn-monitor
 ```
 
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐
+│  main.go    │     │ monitors.go  │     │  hotkey.go   │
+│             │────▶│  xrandr +    │     │ /dev/input/* │
+│  CLI entry  │     │  EDID parse  │     │  L+R arrow   │
+└──────┬──────┘     └──────────────┘     └──────┬───────┘
+       │  user selects monitor                  │ hotkey fired
+       ▼                                        ▼
+┌──────────────┐                        ┌──────────────┐
+│ capture.go   │◀───────────────────────│  main loop   │
+│  screenshot  │  capture selected      │  (goroutine) │
+│  → JPEG 95%  │  monitor bounds        └──────────────┘
+└──────┬───────┘
+       │ []byte (JPEG)
+       ▼
+┌──────────────┐     ┌──────────────────┐
+│  solve.go    │────▶│  Claude Opus 4.6 │
+│  base64 enc  │     │  vision API      │
+│  msg history │◀────│  streaming resp  │
+└──────────────┘     └──────────────────┘
+```
+
+**Flow**: startup → detect monitors → user picks one → listen for hotkey → capture screen → JPEG encode → base64 → Claude vision API → print response. Message history persists across captures for multi-turn context.
+
 ## Usage
 
 1. The CLI lists available monitors with model names — select one by number

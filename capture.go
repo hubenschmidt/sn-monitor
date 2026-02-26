@@ -21,7 +21,7 @@ func captureMonitor(index int) ([]byte, error) {
 	}
 
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
 		return nil, fmt.Errorf("jpeg encode failed: %w", err)
 	}
 	return buf.Bytes(), nil

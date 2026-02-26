@@ -8,7 +8,10 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-var history []anthropic.MessageParam
+var (
+	solveModel = anthropic.ModelClaudeOpus4_6
+	history    []anthropic.MessageParam
+)
 
 func solve(pngData []byte) (string, error) {
 	client := anthropic.NewClient()
@@ -21,7 +24,7 @@ func solve(pngData []byte) (string, error) {
 	))
 
 	resp, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
-		Model:     anthropic.ModelClaudeOpus4_5_20251101,
+		Model:     solveModel,
 		MaxTokens: 2048,
 		Messages:  history,
 	})

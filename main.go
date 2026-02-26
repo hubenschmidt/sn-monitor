@@ -40,7 +40,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("\nWatching %s (%s). Press Left+Right arrows to capture, Ctrl+C to quit.\n\n",
+	fmt.Printf("\nModel: %s\n", solveModel)
+	fmt.Printf("Watching %s (%s). Press Left+Right arrows to capture, Ctrl+C to quit.\n\n",
 		monitors[selected].Model, monitors[selected].Output)
 
 	ch := make(chan struct{}, 1)
