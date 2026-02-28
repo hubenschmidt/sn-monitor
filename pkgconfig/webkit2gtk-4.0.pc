@@ -1,0 +1,8 @@
+prefix=/usr
+libdir=${prefix}/lib/x86_64-linux-gnu
+includedir=${prefix}/include
+
+Name: webkit2gtk-4.0
+Description: Shim that maps webkit2gtk-4.0 (required by webview_go) to the installed webkit2gtk-4.1
+Version: 2.50.4
+Requires: webkit2gtk-4.1

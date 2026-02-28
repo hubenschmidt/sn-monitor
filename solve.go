@@ -26,7 +26,7 @@ func (p *AnthropicProvider) Solve(pngData []byte) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
 
 	p.history = append(p.history, anthropic.NewUserMessage(
-		anthropic.NewImageBlockBase64("image/png", b64),
+		anthropic.NewImageBlockBase64("image/jpeg", b64),
 		anthropic.NewTextBlock(solvePrompt),
 	))
 

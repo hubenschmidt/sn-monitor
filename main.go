@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/charmbracelet/glamour"
 	"github.com/joho/godotenv"
 )
 
@@ -42,6 +41,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	renderer := selectRenderer(scanner)
+
 	fmt.Printf("\nModel: %s\n", provider.ModelName())
 	fmt.Printf("Watching %s (%s). Press Left+Right arrows to capture, Ctrl+C to quit.\n\n",
 		monitors[selected].Model, monitors[selected].Output)
@@ -54,15 +55,27 @@ func main() {
 		}
 	}()
 
-	for range ch {
-		handleCapture(selected, provider)
+	overlay := findOverlay(renderer)
+	if overlay == nil {
+		for range ch {
+			handleCapture(selected, provider, renderer)
+		}
+		return
 	}
+
+	// Overlay mode: webview.Run() must be on the main thread
+	go func() {
+		for range ch {
+			handleCapture(selected, provider, renderer)
+		}
+	}()
+	overlay.Run()
 }
 
 func selectProvider(scanner *bufio.Scanner) (Provider, error) {
 	fmt.Println("\nSelect model:")
 	fmt.Println("  1: Claude Opus 4.6 (Anthropic)")
-	fmt.Println("  2: GPT-5.3 Codex (OpenAI)")
+	fmt.Println("  2: GPT-5.2 Codex (OpenAI)")
 	fmt.Print("Choice [1]: ")
 	scanner.Scan()
 
@@ -90,31 +103,55 @@ func newOpenAIProvider() (Provider, error) {
 	return NewOpenAIProvider(), nil
 }
 
-func handleCapture(monitorIdx int, provider Provider) {
-	fmt.Println("capturing...")
-	pngData, err := captureMonitor(monitorIdx)
+func selectRenderer(scanner *bufio.Scanner) Renderer {
+	fmt.Println("\nOutput mode:")
+	fmt.Println("  1: Terminal")
+	fmt.Println("  2: Overlay")
+	fmt.Println("  3: Both")
+	fmt.Print("Choice [1]: ")
+	scanner.Scan()
+
+	input := strings.TrimSpace(scanner.Text())
+	if input == "2" {
+		return NewOverlayRenderer()
+	}
+	if input == "3" {
+		return &MultiRenderer{renderers: []Renderer{
+			&TerminalRenderer{},
+			NewOverlayRenderer(),
+		}}
+	}
+	return &TerminalRenderer{}
+}
+
+func findOverlay(r Renderer) *OverlayRenderer {
+	if o, ok := r.(*OverlayRenderer); ok {
+		return o
+	}
+	m, ok := r.(*MultiRenderer)
+	if !ok {
+		return nil
+	}
+	for _, sub := range m.renderers {
+		if o, ok := sub.(*OverlayRenderer); ok {
+			return o
+		}
+	}
+	return nil
+}
+
+func handleCapture(monitorIdx int, provider Provider, renderer Renderer) {
+	renderer.SetStatus("capturing...")
+	imgData, err := captureMonitor(monitorIdx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "capture error: %v\n", err)
+		renderer.SetStatus("capture error: " + err.Error())
 		return
 	}
-	fmt.Println("solving...")
-	answer, err := provider.Solve(pngData)
+	renderer.SetStatus("solving...")
+	answer, err := provider.Solve(imgData)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "solve error: %v\n", err)
+		renderer.SetStatus("solve error: " + err.Error())
 		return
 	}
-
-	renderer, err := glamour.NewTermRenderer(
-		glamour.WithStandardStyle("dark"),
-		glamour.WithWordWrap(0),
-	)
-	rendered := answer
-	if err == nil {
-		rendered, _ = renderer.Render(answer)
-	}
-
-	fmt.Println(strings.Repeat("─", 60))
-	fmt.Print(rendered)
-	fmt.Println(strings.Repeat("─", 60))
-	fmt.Println()
+	renderer.Render(answer)
 }

@@ -27,7 +27,7 @@ func (p *OpenAIProvider) ModelName() string {
 
 func (p *OpenAIProvider) Solve(pngData []byte) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
-	dataURL := "data:image/png;base64," + b64
+	dataURL := "data:image/jpeg;base64," + b64
 
 	params := responses.ResponseNewParams{
 		Model:           openAIModel,
