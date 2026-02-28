@@ -20,12 +20,12 @@ func solve(pngData []byte) (string, error) {
 
 	history = append(history, anthropic.NewUserMessage(
 		anthropic.NewImageBlockBase64("image/jpeg", b64),
-		anthropic.NewTextBlock("Look at this screen capture. If there's a code problem, solve it concisely. If it's a continuation of a previous problem, build on your prior answer."),
+		anthropic.NewTextBlock("Look at this screen capture. If there's a code problem, provide two solutions:\n\n1. **Naive Solution** — pseudocode, then full code, then explain how it works, time/space complexity, and edge cases.\n2. **Optimized Solution** — pseudocode, then full code, then explain how it works, time/space complexity, edge cases, and why it's better than the naive approach.\n\nIf it's a continuation of a previous problem, build on your prior answer."),
 	))
 
 	resp, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
 		Model:     solveModel,
-		MaxTokens: 2048,
+		MaxTokens: 4096,
 		Messages:  history,
 	})
 	if err != nil {
