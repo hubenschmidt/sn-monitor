@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/joho/godotenv"
 )
 
@@ -35,12 +36,13 @@ func main() {
 	}
 	selected := choice - 1
 
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		fmt.Fprintf(os.Stderr, "error: ANTHROPIC_API_KEY not set\n")
+	provider, err := selectProvider(scanner)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("\nModel: %s\n", solveModel)
+	fmt.Printf("\nModel: %s\n", provider.ModelName())
 	fmt.Printf("Watching %s (%s). Press Left+Right arrows to capture, Ctrl+C to quit.\n\n",
 		monitors[selected].Model, monitors[selected].Output)
 
@@ -53,11 +55,42 @@ func main() {
 	}()
 
 	for range ch {
-		handleCapture(selected)
+		handleCapture(selected, provider)
 	}
 }
 
-func handleCapture(monitorIdx int) {
+func selectProvider(scanner *bufio.Scanner) (Provider, error) {
+	fmt.Println("\nSelect model:")
+	fmt.Println("  1: Claude Opus 4.6 (Anthropic)")
+	fmt.Println("  2: GPT-5.3 Codex (OpenAI)")
+	fmt.Print("Choice [1]: ")
+	scanner.Scan()
+
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" || input == "1" {
+		return newAnthropicProvider()
+	}
+	if input == "2" {
+		return newOpenAIProvider()
+	}
+	return nil, fmt.Errorf("invalid model selection: %s", input)
+}
+
+func newAnthropicProvider() (Provider, error) {
+	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+		return nil, fmt.Errorf("ANTHROPIC_API_KEY not set")
+	}
+	return NewAnthropicProvider(), nil
+}
+
+func newOpenAIProvider() (Provider, error) {
+	if os.Getenv("OPENAI_API_KEY") == "" {
+		return nil, fmt.Errorf("OPENAI_API_KEY not set")
+	}
+	return NewOpenAIProvider(), nil
+}
+
+func handleCapture(monitorIdx int, provider Provider) {
 	fmt.Println("capturing...")
 	pngData, err := captureMonitor(monitorIdx)
 	if err != nil {
@@ -65,13 +98,23 @@ func handleCapture(monitorIdx int) {
 		return
 	}
 	fmt.Println("solving...")
-	answer, err := solve(pngData)
+	answer, err := provider.Solve(pngData)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "solve error: %v\n", err)
 		return
 	}
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(0),
+	)
+	rendered := answer
+	if err == nil {
+		rendered, _ = renderer.Render(answer)
+	}
+
 	fmt.Println(strings.Repeat("─", 60))
-	fmt.Println(answer)
+	fmt.Print(rendered)
 	fmt.Println(strings.Repeat("─", 60))
 	fmt.Println()
 }

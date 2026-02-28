@@ -8,39 +8,54 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 )
 
-var (
-	solveModel = anthropic.ModelClaudeOpus4_6
-	history    []anthropic.MessageParam
-)
+type AnthropicProvider struct {
+	client  anthropic.Client
+	history []anthropic.MessageParam
+}
 
-func solve(pngData []byte) (string, error) {
+func NewAnthropicProvider() *AnthropicProvider {
 	client := anthropic.NewClient()
+	return &AnthropicProvider{client: client}
+}
 
+func (p *AnthropicProvider) ModelName() string {
+	return string(anthropic.ModelClaudeOpus4_6)
+}
+
+func (p *AnthropicProvider) Solve(pngData []byte) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
 
-	history = append(history, anthropic.NewUserMessage(
-		anthropic.NewImageBlockBase64("image/jpeg", b64),
-		anthropic.NewTextBlock("Look at this screen capture. If there's a code problem, provide two solutions:\n\n1. **Naive Solution** — pseudocode, then full code, then explain how it works, time/space complexity, and edge cases.\n2. **Optimized Solution** — pseudocode, then full code, then explain how it works, time/space complexity, edge cases, and why it's better than the naive approach.\n\nIf it's a continuation of a previous problem, build on your prior answer."),
+	p.history = append(p.history, anthropic.NewUserMessage(
+		anthropic.NewImageBlockBase64("image/png", b64),
+		anthropic.NewTextBlock(solvePrompt),
 	))
 
-	resp, err := client.Messages.New(context.Background(), anthropic.MessageNewParams{
-		Model:     solveModel,
+	resp, err := p.client.Messages.New(context.Background(), anthropic.MessageNewParams{
+		Model:     anthropic.ModelClaudeOpus4_6,
 		MaxTokens: 4096,
-		Messages:  history,
+		Messages:  p.history,
 	})
 	if err != nil {
-		// Remove the failed user message
-		history = history[:len(history)-1]
+		p.history = p.history[:len(p.history)-1]
 		return "", fmt.Errorf("api call failed: %w", err)
 	}
 
-	for _, block := range resp.Content {
+	text := extractText(resp.Content)
+	if text == "" {
+		return "", fmt.Errorf("no text in response")
+	}
+
+	p.history = append(p.history, anthropic.NewAssistantMessage(
+		anthropic.NewTextBlock(text),
+	))
+	return text, nil
+}
+
+func extractText(blocks []anthropic.ContentBlockUnion) string {
+	for _, block := range blocks {
 		if block.Type == "text" {
-			history = append(history, anthropic.NewAssistantMessage(
-				anthropic.NewTextBlock(block.Text),
-			))
-			return block.Text, nil
+			return block.Text
 		}
 	}
-	return "", fmt.Errorf("no text in response")
+	return ""
 }
