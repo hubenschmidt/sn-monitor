@@ -76,8 +76,7 @@ func main() {
 func selectProvider(scanner *bufio.Scanner) (Provider, error) {
 	fmt.Println("\nSelect model:")
 	fmt.Println("  1: Claude Opus 4.6 (Anthropic)")
-	fmt.Println("  2: Claude Sonnet 4.6 (Anthropic)")
-	fmt.Println("  3: GPT-5.3 Codex (OpenAI)")
+	fmt.Println("  2: GPT-5.3 Codex (OpenAI)")
 	fmt.Print("Choice [1]: ")
 	scanner.Scan()
 
@@ -86,9 +85,6 @@ func selectProvider(scanner *bufio.Scanner) (Provider, error) {
 		return newAnthropicProvider("claude-opus-4-6")
 	}
 	if input == "2" {
-		return newAnthropicProvider("claude-sonnet-4-6")
-	}
-	if input == "3" {
 		return newOpenAIProvider()
 	}
 	return nil, fmt.Errorf("invalid model selection: %s", input)
