@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/joho/godotenv"
 )
 
@@ -75,25 +76,29 @@ func main() {
 func selectProvider(scanner *bufio.Scanner) (Provider, error) {
 	fmt.Println("\nSelect model:")
 	fmt.Println("  1: Claude Opus 4.6 (Anthropic)")
-	fmt.Println("  2: GPT-5.2 Codex (OpenAI)")
+	fmt.Println("  2: Claude Sonnet 4.6 (Anthropic)")
+	fmt.Println("  3: GPT-5.3 Codex (OpenAI)")
 	fmt.Print("Choice [1]: ")
 	scanner.Scan()
 
 	input := strings.TrimSpace(scanner.Text())
 	if input == "" || input == "1" {
-		return newAnthropicProvider()
+		return newAnthropicProvider("claude-opus-4-6")
 	}
 	if input == "2" {
+		return newAnthropicProvider("claude-sonnet-4-6")
+	}
+	if input == "3" {
 		return newOpenAIProvider()
 	}
 	return nil, fmt.Errorf("invalid model selection: %s", input)
 }
 
-func newAnthropicProvider() (Provider, error) {
+func newAnthropicProvider(model string) (Provider, error) {
 	if os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return nil, fmt.Errorf("ANTHROPIC_API_KEY not set")
 	}
-	return NewAnthropicProvider(), nil
+	return NewAnthropicProvider(anthropic.Model(model)), nil
 }
 
 func newOpenAIProvider() (Provider, error) {
@@ -148,10 +153,13 @@ func handleCapture(monitorIdx int, provider Provider, renderer Renderer) {
 		return
 	}
 	renderer.SetStatus("solving...")
-	answer, err := provider.Solve(imgData)
+	renderer.StreamStart()
+	_, err = provider.Solve(imgData, func(delta string) {
+		renderer.StreamDelta(delta)
+	})
 	if err != nil {
 		renderer.SetStatus("solve error: " + err.Error())
 		return
 	}
-	renderer.Render(answer)
+	renderer.StreamDone()
 }

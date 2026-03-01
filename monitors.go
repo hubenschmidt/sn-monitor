@@ -10,13 +10,13 @@ import (
 )
 
 type MonitorInfo struct {
-	Index   int
-	Output  string
-	Model   string
-	Geom    string
-	X, Y    int
-	Width   int
-	Height  int
+	Index  int
+	Output string
+	Model  string
+	Geom   string
+	X, Y   int
+	Width  int
+	Height int
 }
 
 func listMonitors() ([]MonitorInfo, error) {
@@ -66,10 +66,6 @@ func parseMonitorLine(line string, idx int, edidNames map[string]string) *Monito
 // parseGeom parses "2192/700x1233/400+1080+177" → w=2192, h=1233, x=1080, y=177
 func parseGeom(g string) (w, h, x, y int) {
 	plusParts := strings.Split(g, "+")
-	if len(plusParts) >= 3 {
-		x, _ = strconv.Atoi(plusParts[1])
-		y, _ = strconv.Atoi(plusParts[2])
-	}
 	dims := plusParts[0]
 	xIdx := strings.Index(dims, "x")
 	if xIdx < 0 {
@@ -85,6 +81,11 @@ func parseGeom(g string) (w, h, x, y int) {
 	}
 	w, _ = strconv.Atoi(wPart)
 	h, _ = strconv.Atoi(hPart)
+	if len(plusParts) < 3 {
+		return
+	}
+	x, _ = strconv.Atoi(plusParts[1])
+	y, _ = strconv.Atoi(plusParts[2])
 	return
 }
 

@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
 )
 
-const openAIModel shared.ResponsesModel = "gpt-5.2-codex"
+const openAIModel shared.ResponsesModel = "gpt-5.3-codex"
 
 type OpenAIProvider struct {
 	client             openai.Client
@@ -25,7 +26,7 @@ func (p *OpenAIProvider) ModelName() string {
 	return string(openAIModel)
 }
 
-func (p *OpenAIProvider) Solve(pngData []byte) (string, error) {
+func (p *OpenAIProvider) Solve(pngData []byte, onDelta func(string)) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
 	dataURL := "data:image/jpeg;base64," + b64
 
@@ -54,34 +55,27 @@ func (p *OpenAIProvider) Solve(pngData []byte) (string, error) {
 		params.PreviousResponseID = openai.String(p.previousResponseID)
 	}
 
-	resp, err := p.client.Responses.New(context.Background(), params)
-	if err != nil {
+	stream := p.client.Responses.NewStreaming(context.Background(), params)
+
+	var buf strings.Builder
+	for stream.Next() {
+		evt := stream.Current()
+		if evt.Type == "response.output_text.delta" {
+			buf.WriteString(evt.Delta.OfString)
+			onDelta(evt.Delta.OfString)
+		}
+		if evt.Type == "response.completed" {
+			p.previousResponseID = evt.Response.ID
+		}
+	}
+
+	if err := stream.Err(); err != nil {
 		return "", fmt.Errorf("api call failed: %w", err)
 	}
 
-	p.previousResponseID = resp.ID
-
-	text := extractOpenAIText(resp.Output)
+	text := buf.String()
 	if text == "" {
 		return "", fmt.Errorf("no text in response")
 	}
 	return text, nil
-}
-
-func extractOpenAIText(output []responses.ResponseOutputItemUnion) string {
-	for _, item := range output {
-		if item.Type == "message" {
-			return extractOutputText(item.Content)
-		}
-	}
-	return ""
-}
-
-func extractOutputText(content []responses.ResponseOutputMessageContentUnion) string {
-	for _, c := range content {
-		if c.Type == "output_text" {
-			return c.Text
-		}
-	}
-	return ""
 }

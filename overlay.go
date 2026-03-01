@@ -81,9 +81,10 @@ import (
 )
 
 type OverlayRenderer struct {
-	w        webview.WebView
-	md       goldmark.Markdown
-	chromaCS string
+	w          webview.WebView
+	md         goldmark.Markdown
+	chromaCS   string
+	streamBuf  strings.Builder
 }
 
 func NewOverlayRenderer() *OverlayRenderer {
@@ -131,6 +132,28 @@ func (o *OverlayRenderer) Render(markdown string) error {
 
 func (o *OverlayRenderer) SetStatus(status string) {
 	js := "document.getElementById('status').textContent=" + jsString(status) + ";"
+	o.w.Dispatch(func() { o.w.Eval(js) })
+}
+
+func (o *OverlayRenderer) StreamStart() {
+	o.streamBuf.Reset()
+	js := "document.getElementById('content').innerHTML='<pre id=\"stream\"></pre>';" +
+		"document.getElementById('status').textContent='';"
+	o.w.Dispatch(func() { o.w.Eval(js) })
+}
+
+func (o *OverlayRenderer) StreamDelta(delta string) {
+	o.streamBuf.WriteString(delta)
+	js := "var s=document.getElementById('stream');if(s)s.textContent+=" + jsString(delta) + ";"
+	o.w.Dispatch(func() { o.w.Eval(js) })
+}
+
+func (o *OverlayRenderer) StreamDone() {
+	html, err := o.markdownToHTML(o.streamBuf.String())
+	if err != nil {
+		html = "<pre>" + escapeHTML(o.streamBuf.String()) + "</pre>"
+	}
+	js := "document.getElementById('content').innerHTML=" + jsString(html) + ";"
 	o.w.Dispatch(func() { o.w.Eval(js) })
 }
 
