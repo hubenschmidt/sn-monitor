@@ -4,7 +4,8 @@ build:
 	go build -o sn-monitor .
 
 run: build
-	./sn-monitor
+	@./setup-mpx.sh || true
+	@./sn-monitor; ./teardown-mpx.sh || true
 
 clean:
 	rm -f sn-monitor

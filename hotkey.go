@@ -8,12 +8,51 @@ import (
 	"unsafe"
 )
 
+type HotkeyAction int
+
+const (
+	HotkeyCapture      HotkeyAction = iota // Left+Right
+	HotkeyFollowUp                         // Up+Down (toggle voice recording)
+	HotkeyExplain                          // Left+Up
+	HotkeyAudioCapture                     // Left+Down (toggle audio capture)
+	HotkeyAudioSend                        // Right+Down (send accumulated transcript to LLM)
+	HotkeyToggleView                       // Right+Up (toggle transcript/chat view)
+	HotkeyClear                            // Right+Left+Up+Down (clear conversation history)
+)
+
+var keyLabels = map[HotkeyAction]string{
+	HotkeyCapture:      "←→ screen",
+	HotkeyAudioCapture: "←↓ audio",
+	HotkeyFollowUp:     "↑↓ mic",
+	HotkeyAudioSend:    "→↓ process",
+	HotkeyClear:        "←→↑↓ clear",
+}
+
+var keyOrder = []HotkeyAction{
+	HotkeyCapture,
+	HotkeyAudioCapture,
+	HotkeyFollowUp,
+	HotkeyAudioSend,
+	HotkeyClear,
+}
+
+var actionNames = map[HotkeyAction]string{
+	HotkeyCapture:      "capture",
+	HotkeyFollowUp:     "voice",
+	HotkeyExplain:      "explain",
+	HotkeyAudioCapture: "audio",
+	HotkeyAudioSend:    "send",
+	HotkeyClear:        "clear",
+}
+
 const (
 	evKey      = 1
 	keyPress   = 1
 	keyRelease = 0
+	keyUp      = 103
 	keyLeft    = 105
 	keyRight   = 106
+	keyDown    = 108
 )
 
 // inputEvent matches the Linux input_event struct on 64-bit.
@@ -27,7 +66,14 @@ type inputEvent struct {
 
 var inputEventSize = int(unsafe.Sizeof(inputEvent{}))
 
-func listenHotkey(ch chan<- struct{}) error {
+type keyState struct {
+	left  bool
+	right bool
+	up    bool
+	down  bool
+}
+
+func listenHotkey(ch chan<- HotkeyAction) error {
 	keyboards := findAllKeyboards()
 	if len(keyboards) == 0 {
 		return fmt.Errorf("no keyboard found in /dev/input/")
@@ -82,7 +128,7 @@ func deviceName(path string) (string, error) {
 	return string(buf[:end]), nil
 }
 
-func listenDevice(path string, ch chan<- struct{}) error {
+func listenDevice(path string, ch chan<- HotkeyAction) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
@@ -90,8 +136,7 @@ func listenDevice(path string, ch chan<- struct{}) error {
 	defer f.Close()
 
 	buf := make([]byte, inputEventSize*64)
-	leftDown := false
-	rightDown := false
+	var ks keyState
 
 	for {
 		n, err := f.Read(buf)
@@ -100,31 +145,78 @@ func listenDevice(path string, ch chan<- struct{}) error {
 		}
 		for i := 0; i+inputEventSize <= n; i += inputEventSize {
 			ev := (*inputEvent)(unsafe.Pointer(&buf[i]))
-			leftDown, rightDown = processEvent(ev, leftDown, rightDown, ch)
+			ks = processEvent(ev, ks, ch)
 		}
 	}
 }
 
-func processEvent(ev *inputEvent, leftDown, rightDown bool, ch chan<- struct{}) (bool, bool) {
+func processEvent(ev *inputEvent, ks keyState, ch chan<- HotkeyAction) keyState {
 	if ev.Type != evKey {
-		return leftDown, rightDown
+		return ks
 	}
 
-	if ev.Code == keyLeft {
-		leftDown = ev.Value == keyPress
-	}
-	if ev.Code == keyRight {
-		rightDown = ev.Value == keyPress
+	pressed := ev.Value == keyPress
+	ks = updateKeyState(ev.Code, pressed, ks)
+
+	// All four keys → clear conversation history
+	if ks.left && ks.right && ks.up && ks.down {
+		send(ch, HotkeyClear)
+		ks.left, ks.right, ks.up, ks.down = false, false, false, false
+		return ks
 	}
 
-	if leftDown && rightDown {
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
-		return false, false
+	// Left+Right → screen capture
+	if ks.left && ks.right {
+		send(ch, HotkeyCapture)
+		ks.left, ks.right = false, false
+		return ks
 	}
-	return leftDown, rightDown
+
+	// Left+Down → toggle audio capture
+	if ks.left && ks.down {
+		send(ch, HotkeyAudioCapture)
+		ks.left, ks.down = false, false
+		return ks
+	}
+
+	// Right+Down → send accumulated transcript to LLM
+	if ks.right && ks.down {
+		send(ch, HotkeyAudioSend)
+		ks.right, ks.down = false, false
+		return ks
+	}
+
+	// Up+Down → toggle voice recording
+	if ks.up && ks.down {
+		send(ch, HotkeyFollowUp)
+		ks.up, ks.down = false, false
+		return ks
+	}
+
+	return ks
+}
+
+func updateKeyState(code uint16, pressed bool, ks keyState) keyState {
+	if code == keyLeft {
+		ks.left = pressed
+	}
+	if code == keyRight {
+		ks.right = pressed
+	}
+	if code == keyUp {
+		ks.up = pressed
+	}
+	if code == keyDown {
+		ks.down = pressed
+	}
+	return ks
+}
+
+func send(ch chan<- HotkeyAction, action HotkeyAction) {
+	select {
+	case ch <- action:
+	default:
+	}
 }
 
 func ioctl(fd uintptr, req uintptr, arg uintptr) (uintptr, uintptr, error) {
