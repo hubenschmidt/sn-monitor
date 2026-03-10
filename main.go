@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -346,6 +348,14 @@ func main() {
 		default:
 		}
 	})
+
+	// Clean shutdown on signal so GTK releases X11 resources
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		renderer.Close()
+	}()
 
 	// Overlay mode: webview.Run() must be on the main thread
 	go dispatch()

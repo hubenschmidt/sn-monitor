@@ -32,6 +32,11 @@ static void show_window(void *gtkWindow) {
 	gtk_widget_show_all(GTK_WIDGET(gtkWindow));
 }
 
+static void set_no_focus(void *gtkWindow) {
+	gtk_window_set_accept_focus(GTK_WINDOW(gtkWindow), FALSE);
+	gtk_window_set_focus_on_map(GTK_WINDOW(gtkWindow), FALSE);
+}
+
 // Paint the window background as fully transparent.
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
 	(void)widget; (void)data;
@@ -106,6 +111,7 @@ type OverlayRenderer struct {
 func NewOverlayRenderer() *OverlayRenderer {
 	// Create GTK window with RGBA visual BEFORE webview touches it
 	gtkWin := C.create_rgba_window()
+	C.set_no_focus(gtkWin)
 	w := webview.NewWindow(false, unsafe.Pointer(gtkWin))
 	w.SetTitle("sn-monitor")
 	w.SetSize(700, 900, webview.HintNone)
