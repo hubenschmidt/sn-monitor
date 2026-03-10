@@ -1,0 +1,5 @@
+{
+  "go.toolsEnvVars": {
+    "PKG_CONFIG_PATH": "./pkgconfig:${env:PKG_CONFIG_PATH}"
+  }
+}
