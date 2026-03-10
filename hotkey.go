@@ -19,6 +19,7 @@ const (
 	HotkeyToggleView                       // Right+Up (toggle transcript/chat view)
 	HotkeyClear                            // Right+Left+Up+Down (clear conversation history)
 	HotkeySoundCheck                       // overlay-button only
+	HotkeyImplement                        // overlay-button only
 )
 
 var keyLabels = map[HotkeyAction]string{
@@ -28,6 +29,7 @@ var keyLabels = map[HotkeyAction]string{
 	HotkeyAudioSend:    "→↓ process",
 	HotkeyClear:        "←→↑↓ clear",
 	HotkeySoundCheck:   "🔊 check",
+	HotkeyImplement:    "⚙ impl",
 }
 
 var keyOrder = []HotkeyAction{
@@ -36,6 +38,7 @@ var keyOrder = []HotkeyAction{
 	HotkeyFollowUp,
 	HotkeyAudioSend,
 	HotkeySoundCheck,
+	HotkeyImplement,
 	HotkeyClear,
 }
 
@@ -46,6 +49,7 @@ var actionNames = map[HotkeyAction]string{
 	HotkeyAudioCapture: "audio",
 	HotkeyAudioSend:    "send",
 	HotkeySoundCheck:   "soundcheck",
+	HotkeyImplement:    "implement",
 	HotkeyClear:        "clear",
 }
 

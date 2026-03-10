@@ -93,8 +93,9 @@ type OverlayRenderer struct {
 	pendingMu sync.Mutex
 	pendingJS strings.Builder
 	closed    atomic.Bool
-	onAction  func(HotkeyAction)
-	provider  Provider
+	onAction      func(HotkeyAction)
+	onToggleChunk func(int, bool)
+	provider      Provider
 	vuJS      atomic.Pointer[string]
 
 	sandboxMu   sync.Mutex
@@ -133,6 +134,13 @@ func NewOverlayRenderer() *OverlayRenderer {
 			return
 		}
 		o.onAction(a)
+	})
+
+	w.Bind("_toggleChunk", func(id int, checked bool) {
+		if o.onToggleChunk == nil {
+			return
+		}
+		o.onToggleChunk(id, checked)
 	})
 
 	// Bind a JS-callable function that drains pending JS updates.
@@ -276,6 +284,10 @@ func (o *OverlayRenderer) SetActionHandler(fn func(HotkeyAction)) {
 	o.onAction = fn
 }
 
+func (o *OverlayRenderer) SetToggleChunkHandler(fn func(int, bool)) {
+	o.onToggleChunk = fn
+}
+
 func (o *OverlayRenderer) SetProvider(p Provider) { o.provider = p }
 
 // eval queues a JS snippet to be executed on the next poll cycle.
@@ -377,13 +389,22 @@ func (o *OverlayRenderer) AppendStreamDone() {
 	o.eval(js)
 }
 
-func (o *OverlayRenderer) AppendTranscriptChunk(source, text string) {
+func (o *OverlayRenderer) AppendTranscriptChunk(source, text string, id int) {
 	ts := time.Now().Format("15:04:05")
-	chunk := fmt.Sprintf(`<div class="transcript-chunk"><span class="ts">[%s</span> <span class="src">%s</span><span class="ts">]</span> %s</div>`,
-		escapeHTML(ts), escapeHTML(source), escapeHTML(text))
+	srcClass := "src-" + source
+	chunk := fmt.Sprintf(
+		`<div class="transcript-chunk" data-id="%d">`+
+			`<input type="checkbox" class="chunk-cb" onchange="_toggleChunk(%d,this.checked)">`+
+			`<span class="ts">[%s</span> <span class="src %s">%s</span><span class="ts">]</span> %s</div>`,
+		id, id, escapeHTML(ts), srcClass, escapeHTML(source), escapeHTML(text))
 	js := `var t=document.getElementById('transcript-content');` +
 		`t.innerHTML+=` + jsString(chunk) + `;` +
-		`if(t.classList.contains('active')){t.scrollTop=t.scrollHeight;}`
+		`if(window._transcriptAutoScroll){t.scrollTop=t.scrollHeight;}`
+	o.eval(js)
+}
+
+func (o *OverlayRenderer) ClearTranscriptCheckboxes() {
+	js := `document.querySelectorAll('.chunk-cb').forEach(function(cb){cb.checked=false;});`
 	o.eval(js)
 }
 
@@ -557,11 +578,15 @@ body {
 }
 .explain-btn:hover { background: rgba(126,200,227,0.2); color: #fff; }
 .transcript-chunk {
+  display: flex; align-items: flex-start; gap: 4px;
   padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
   font-size: 12px;
 }
+.chunk-cb { margin-top: 2px; flex-shrink: 0; cursor: pointer; accent-color: #7ec8e3; }
 .transcript-chunk .ts { color: #888; }
-.transcript-chunk .src { color: #7ec8e3; font-weight: bold; }
+.transcript-chunk .src { font-weight: bold; }
+.src-audio { color: #7ec8e3; }
+.src-mic { color: #e05050; }
 @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
 .rec-dot {
   display: inline-block; width: 8px; height: 8px;
@@ -689,7 +714,21 @@ window._runCombined=function(){
   _runSandbox(code,tests,lang);
 };
 window._autoScroll=true;
-document.getElementById('chat-content').addEventListener('wheel',function(){window._autoScroll=false;});
+(function(){
+  var cc=document.getElementById('chat-content');
+  cc.addEventListener('wheel',function(){window._autoScroll=false;});
+  cc.addEventListener('scroll',function(){
+    if(cc.scrollTop+cc.clientHeight>=cc.scrollHeight-5)window._autoScroll=true;
+  });
+})();
+window._transcriptAutoScroll=true;
+(function(){
+  var tc=document.getElementById('transcript-content');
+  tc.addEventListener('wheel',function(){window._transcriptAutoScroll=false;});
+  tc.addEventListener('scroll',function(){
+    if(tc.scrollTop+tc.clientHeight>=tc.scrollHeight-5)window._transcriptAutoScroll=true;
+  });
+})();
 window._logBadge=0;
 window._logIdx=-1;
 window._sandboxLangs={'python':1,'go':1,'javascript':1,'js':1,'typescript':1,'ts':1,'cpp':1,'c++':1,'rust':1,'java':1};
@@ -702,6 +741,7 @@ window.switchTab=function(name){
     else{btn.className='';div.className='tab-content';}
   }
   if(name==='transcript'){
+    window._transcriptAutoScroll=true;
     document.getElementById('transcript-content').scrollTop=document.getElementById('transcript-content').scrollHeight;
   }
   if(name==='log'){

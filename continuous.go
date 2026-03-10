@@ -27,6 +27,13 @@ const (
 	maxSummarizeRetry  = 3
 )
 
+// TranscriptEntry is a UI-stable transcript chunk with a unique ID.
+// Separate from rawChunks (which feed the summarization pipeline and get drained).
+type TranscriptEntry struct {
+	ID   int
+	Text string
+}
+
 // AudioCapture records audio continuously, transcribes in chunks,
 // and accumulates transcript text for later use by the LLM.
 type AudioCapture struct {
@@ -45,6 +52,9 @@ type AudioCapture struct {
 	summaries    []string
 	summarizing  atomic.Bool
 	retryCount   int
+	entries      []TranscriptEntry
+	selected     map[int]bool
+	nextID       int
 }
 
 func NewAudioCapture(mode CaptureMode, monSource string, whisperURL string, renderer Renderer, summarize SummarizeFn) *AudioCapture {
@@ -75,6 +85,9 @@ func (ac *AudioCapture) start() {
 	ac.rawCharCount = 0
 	ac.summaries = nil
 	ac.retryCount = 0
+	ac.entries = nil
+	ac.selected = make(map[int]bool)
+	ac.nextID = 0
 	ac.mu.Unlock()
 
 	ac.recorder = NewRecorder(CaptureModeSystem, ac.monSource)
@@ -145,6 +158,8 @@ func (ac *AudioCapture) BuildContext() string {
 	ac.rawChunks = nil
 	ac.rawCharCount = 0
 	ac.retryCount = 0
+	ac.entries = nil
+	ac.selected = make(map[int]bool)
 
 	return strings.TrimSpace(b.String())
 }
@@ -201,13 +216,16 @@ func (ac *AudioCapture) TranscribeNow() {
 	ac.mu.Lock()
 	ac.rawChunks = append(ac.rawChunks, trimmed)
 	ac.rawCharCount += len(trimmed)
+	id := ac.nextID
+	ac.nextID++
+	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: trimmed})
 	n := ac.rawCharCount
 	for _, s := range ac.summaries {
 		n += len(s)
 	}
 	ac.mu.Unlock()
 
-	ac.renderer.AppendTranscriptChunk("audio", trimmed)
+	ac.renderer.AppendTranscriptChunk("audio", trimmed, id)
 	ac.renderer.SetStatus(fmt.Sprintf("audio capture — %d chars accumulated", n))
 
 	ac.maybeStartSummarize()
@@ -273,6 +291,54 @@ func (ac *AudioCapture) doSummarize() {
 	ac.mu.Unlock()
 
 	ac.renderer.SetStatus("transcript segment summarized")
+}
+
+// AddEntry appends a transcript entry and returns its ID.
+func (ac *AudioCapture) AddEntry(text string) int {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	id := ac.nextID
+	ac.nextID++
+	ac.entries = append(ac.entries, TranscriptEntry{ID: id, Text: text})
+	return id
+}
+
+// ToggleSelection marks or unmarks a transcript entry for selective sending.
+func (ac *AudioCapture) ToggleSelection(id int, on bool) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	if ac.selected == nil {
+		ac.selected = make(map[int]bool)
+	}
+	if on {
+		ac.selected[id] = true
+		return
+	}
+	delete(ac.selected, id)
+}
+
+// BuildSelectedContext joins only the selected entry texts.
+// Returns "" if nothing is selected.
+func (ac *AudioCapture) BuildSelectedContext() string {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+	if len(ac.selected) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, e := range ac.entries {
+		if ac.selected[e.ID] {
+			parts = append(parts, e.Text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// ClearSelections clears all selected transcript entries.
+func (ac *AudioCapture) ClearSelections() {
+	ac.mu.Lock()
+	ac.selected = make(map[int]bool)
+	ac.mu.Unlock()
 }
 
 // RunChunkLoop polls for silence-based chunk boundaries while active.

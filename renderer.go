@@ -16,7 +16,8 @@ type Renderer interface {
 	AppendStreamStart()
 	AppendStreamDelta(delta string)
 	AppendStreamDone()
-	AppendTranscriptChunk(source, text string)
+	AppendTranscriptChunk(source, text string, id int)
+	ClearTranscriptCheckboxes()
 	SetMicRecording(recording bool)
 	SetAudioRecording(recording bool)
 	SetSoundCheck(active bool)
@@ -105,9 +106,11 @@ func (t *TerminalRenderer) AppendStreamDone() {
 	t.Render(t.streamBuf.String())
 }
 
-func (t *TerminalRenderer) AppendTranscriptChunk(source, text string) {
+func (t *TerminalRenderer) AppendTranscriptChunk(source, text string, id int) {
 	fmt.Printf("\033[2m[%s] %s\033[0m\n", source, text)
 }
+
+func (t *TerminalRenderer) ClearTranscriptCheckboxes() {}
 
 func (t *TerminalRenderer) SetMicRecording(recording bool) {}
 
@@ -177,9 +180,15 @@ func (m *MultiRenderer) AppendStreamDone() {
 	}
 }
 
-func (m *MultiRenderer) AppendTranscriptChunk(source, text string) {
+func (m *MultiRenderer) AppendTranscriptChunk(source, text string, id int) {
 	for _, r := range m.renderers {
-		r.AppendTranscriptChunk(source, text)
+		r.AppendTranscriptChunk(source, text, id)
+	}
+}
+
+func (m *MultiRenderer) ClearTranscriptCheckboxes() {
+	for _, r := range m.renderers {
+		r.ClearTranscriptCheckboxes()
 	}
 }
 

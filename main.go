@@ -337,6 +337,9 @@ func main() {
 	}
 
 	overlay.SetProvider(provider)
+	overlay.SetToggleChunkHandler(func(id int, checked bool) {
+		ac.ToggleSelection(id, checked)
+	})
 	overlay.SetActionHandler(func(a HotkeyAction) {
 		select {
 		case ch <- a:
@@ -503,6 +506,23 @@ var languages = map[string]string{
 	"7": "Rust",
 }
 
+var fenceLangs = map[string]string{
+	"Python":                    "python",
+	"JavaScript (ECMAScript 6)": "javascript",
+	"TypeScript":                "typescript",
+	"Go":                        "go",
+	"Java":                      "java",
+	"C++":                       "cpp",
+	"Rust":                      "rust",
+}
+
+func fenceLang(lang string) string {
+	if f, ok := fenceLangs[lang]; ok {
+		return f
+	}
+	return strings.ToLower(lang)
+}
+
 func selectLanguage(scanner *bufio.Scanner) string {
 	fmt.Println("\nCode language:")
 	fmt.Println("  1: Python")
@@ -599,6 +619,17 @@ func handleAction(action HotkeyAction, monitorIdx int, provider Provider, render
 		handleSoundCheckToggle(recorder, ac, renderer, soundCheckOn)
 		return
 	}
+	if action == HotkeyImplement {
+		if !llmBusy.CompareAndSwap(false, true) {
+			renderer.SetStatus("LLM busy")
+			return
+		}
+		go func() {
+			defer llmBusy.Store(false)
+			handleImplement(provider, renderer, ac, lang)
+		}()
+		return
+	}
 	if action == HotkeyClear {
 		if *micStopCh != nil {
 			close(*micStopCh)
@@ -620,7 +651,10 @@ Transcript:
 }
 
 func handleAudioSend(ac *AudioCapture, provider Provider, renderer Renderer, lang string) {
-	transcript := ac.BuildContext()
+	transcript := ac.BuildSelectedContext()
+	if transcript == "" {
+		transcript = ac.BuildContext()
+	}
 	if transcript == "" {
 		renderer.SetStatus("no transcript accumulated")
 		return
@@ -637,6 +671,9 @@ func handleAudioSend(ac *AudioCapture, provider Provider, renderer Renderer, lan
 	}
 	renderer.AppendStreamDone()
 	renderer.SetStatus("")
+
+	ac.ClearSelections()
+	renderer.ClearTranscriptCheckboxes()
 }
 
 func handleMicStart(recorder *Recorder, renderer Renderer, ac *AudioCapture, whisperURL string) chan struct{} {
@@ -683,8 +720,9 @@ func handleMicStop(recorder *Recorder, renderer Renderer, ac *AudioCapture, whis
 		return
 	}
 
+	id := ac.AddEntry(trimmed)
 	ac.AppendTranscript(trimmed)
-	renderer.AppendTranscriptChunk("mic", trimmed)
+	renderer.AppendTranscriptChunk("mic", trimmed, id)
 	renderer.SetStatus(fmt.Sprintf("mic stopped — %d chars accumulated", ac.TranscriptLen()))
 }
 
@@ -709,8 +747,9 @@ func micTranscribeChunk(recorder *Recorder, renderer Renderer, ac *AudioCapture,
 		return
 	}
 
+	id := ac.AddEntry(trimmed)
 	ac.AppendTranscript(trimmed)
-	renderer.AppendTranscriptChunk("mic", trimmed)
+	renderer.AppendTranscriptChunk("mic", trimmed, id)
 	renderer.SetStatus(fmt.Sprintf("mic — %d chars accumulated", ac.TranscriptLen()))
 }
 
@@ -718,6 +757,28 @@ func handleExplain(provider Provider, renderer Renderer) {
 	renderer.SetStatus("thinking...")
 	renderer.AppendStreamStart()
 	_, err := provider.FollowUp("Explain further in more detail.", func(delta string) {
+		renderer.AppendStreamDelta(delta)
+	})
+	if err != nil {
+		renderer.SetStatus("follow-up error: " + err.Error())
+		return
+	}
+	renderer.AppendStreamDone()
+	renderer.SetStatus("")
+}
+
+func handleImplement(provider Provider, renderer Renderer, ac *AudioCapture, lang string) {
+	transcript := ac.BuildContext()
+	fence := fenceLang(lang)
+	prompt := "Based on our conversation so far, please implement the complete, working solution in " + lang + ". " +
+		"Use markdown fenced code blocks (```" + fence + ") for all code. Keep explanations minimal."
+	if transcript != "" {
+		prompt += "\n\nAdditional context from audio transcript:\n" + transcript
+	}
+
+	renderer.SetStatus("implementing...")
+	renderer.AppendStreamStart()
+	_, err := provider.FollowUp(prompt, func(delta string) {
 		renderer.AppendStreamDelta(delta)
 	})
 	if err != nil {
