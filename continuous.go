@@ -79,6 +79,16 @@ func (ac *AudioCapture) Toggle() {
 	ac.start()
 }
 
+func (ac *AudioCapture) StartSoundCheck() {
+	ac.recorder = NewRecorder(CaptureModeSystem, ac.monSource)
+	if err := ac.recorder.Start(); err != nil {
+		ac.renderer.SetStatus("audio capture error: " + err.Error())
+		return
+	}
+	ac.stopCh = make(chan struct{})
+	ac.active.Store(true)
+}
+
 func (ac *AudioCapture) start() {
 	ac.mu.Lock()
 	ac.rawChunks = nil
@@ -90,7 +100,7 @@ func (ac *AudioCapture) start() {
 	ac.nextID = 0
 	ac.mu.Unlock()
 
-	ac.recorder = NewRecorder(CaptureModeSystem, ac.monSource)
+	ac.recorder = NewRecorder(ac.mode, ac.monSource)
 	if err := ac.recorder.Start(); err != nil {
 		ac.renderer.SetStatus("audio capture error: " + err.Error())
 		return
@@ -341,6 +351,19 @@ func (ac *AudioCapture) BuildSelectedContext() string {
 func (ac *AudioCapture) ClearSelections() {
 	ac.mu.Lock()
 	ac.selected = make(map[int]bool)
+	ac.mu.Unlock()
+}
+
+// ClearAll resets all accumulated state (raw chunks, summaries, entries, selections).
+func (ac *AudioCapture) ClearAll() {
+	ac.mu.Lock()
+	ac.rawChunks = nil
+	ac.rawCharCount = 0
+	ac.summaries = nil
+	ac.retryCount = 0
+	ac.entries = nil
+	ac.selected = make(map[int]bool)
+	ac.nextID = 0
 	ac.mu.Unlock()
 }
 

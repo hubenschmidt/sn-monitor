@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,15 +25,44 @@ import (
 
 const configPath = "config.json"
 
+// AppState holds accumulated inputs (screenshot, etc.) until the user triggers Process.
+type AppState struct {
+	mu         sync.Mutex
+	screenshot []byte
+}
+
+func (s *AppState) SetScreenshot(data []byte) {
+	s.mu.Lock()
+	s.screenshot = data
+	s.mu.Unlock()
+}
+
+func (s *AppState) ConsumeScreenshot() ([]byte, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data := s.screenshot
+	s.screenshot = nil
+	return data, len(data) > 0
+}
+
+func (s *AppState) Clear() {
+	s.mu.Lock()
+	s.screenshot = nil
+	s.mu.Unlock()
+}
+
 type AppConfig struct {
-	Name         string `json:"name"`
-	Monitor      int    `json:"monitor"`
-	Provider     string `json:"provider"`
-	Renderer     string `json:"renderer"`
-	Language     string `json:"language"`
-	AudioMode    string `json:"audio_mode"`
-	MonSource    string `json:"mon_source,omitempty"`
-	WhisperModel string `json:"whisper_model,omitempty"`
+	Name              string `json:"name"`
+	Monitor           int    `json:"monitor"`
+	OverlayMonitor    int    `json:"overlay_monitor"`
+	OverlayFullscreen bool   `json:"overlay_fullscreen,omitempty"`
+	Provider          string `json:"provider"`
+	Renderer          string `json:"renderer"`
+	Language          string `json:"language"`
+	AudioMode         string `json:"audio_mode"`
+	MonSource         string `json:"mon_source,omitempty"`
+	WhisperModel      string `json:"whisper_model,omitempty"`
+	ContextDir        string `json:"context_dir,omitempty"`
 }
 
 type ConfigFile struct {
@@ -84,10 +114,45 @@ func saveConfigs(configs []AppConfig) {
 }
 
 func promptSavedConfig(scanner *bufio.Scanner, configs []AppConfig, monitors []MonitorInfo) *AppConfig {
-	if len(configs) == 0 {
-		return nil
-	}
+	for {
+		if len(configs) == 0 {
+			return nil
+		}
+		printConfigs(configs, monitors)
+		fmt.Printf("  %d: New configuration\n", len(configs)+1)
+		fmt.Print("Choice [new] (d<N> to delete): ")
+		scanner.Scan()
 
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			return nil
+		}
+		if !strings.HasPrefix(input, "d") && !strings.HasPrefix(input, "D") {
+			idx, err := strconv.Atoi(input)
+			if err != nil || idx < 1 || idx > len(configs) {
+				return nil
+			}
+			return &configs[idx-1]
+		}
+		configs = handleDeleteConfig(input[1:], configs)
+		fmt.Println()
+	}
+}
+
+func handleDeleteConfig(idxStr string, configs []AppConfig) []AppConfig {
+	idx, err := strconv.Atoi(strings.TrimSpace(idxStr))
+	if err != nil || idx < 1 || idx > len(configs) {
+		fmt.Println("  invalid delete index")
+		return configs
+	}
+	name := configs[idx-1].Name
+	configs = append(configs[:idx-1], configs[idx:]...)
+	saveConfigs(configs)
+	fmt.Printf("  deleted %q\n", name)
+	return configs
+}
+
+func printConfigs(configs []AppConfig, monitors []MonitorInfo) {
 	fmt.Println("\nSaved configurations:")
 	for i, c := range configs {
 		monLabel := fmt.Sprintf("#%d", c.Monitor+1)
@@ -121,21 +186,22 @@ func promptSavedConfig(scanner *bufio.Scanner, configs []AppConfig, monitors []M
 		}
 		fmt.Printf("  %d: %q\n", i+1, c.Name)
 		fmt.Printf("     Monitor: %s | Model: %s | Output: %s\n", monLabel, prov, rend)
+		ctxDir := c.ContextDir
+		if ctxDir == "" {
+			ctxDir = "(none)"
+		}
+		overlayLabel := fmt.Sprintf("#%d", c.OverlayMonitor+1)
+		if c.OverlayMonitor >= 0 && c.OverlayMonitor < len(monitors) {
+			om := monitors[c.OverlayMonitor]
+			overlayLabel = fmt.Sprintf("%s (%s)", om.Model, om.Output)
+		}
 		fmt.Printf("     Language: %s | Audio: %s | Whisper: %s\n", lang, audio, wmLabel)
+		fsLabel := "no"
+		if c.OverlayFullscreen {
+			fsLabel = "yes"
+		}
+		fmt.Printf("     Overlay: %s (fullscreen: %s) | Context: %s\n", overlayLabel, fsLabel, ctxDir)
 	}
-	fmt.Printf("  %d: New configuration\n", len(configs)+1)
-	fmt.Print("Choice [new]: ")
-	scanner.Scan()
-
-	input := strings.TrimSpace(scanner.Text())
-	if input == "" {
-		return nil
-	}
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(configs) {
-		return nil
-	}
-	return &configs[idx-1]
 }
 
 func promptSaveConfig(scanner *bufio.Scanner, cfg AppConfig) {
@@ -225,16 +291,19 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	var selected int
+	var overlayMonitor int
+	var overlayFullscreen bool
 	var provider Provider
 	var renderer Renderer
 	var lang string
 	var captureMode CaptureMode
 	var monSource string
 	var whisperChoice string
+	var contextDir string
 
 	saved := promptSavedConfig(scanner, loadConfigs(), monitors)
 	if saved != nil {
-		selected, provider, renderer, lang, captureMode, monSource, whisperChoice, err = applyConfig(*saved, monitors)
+		selected, overlayMonitor, overlayFullscreen, provider, renderer, lang, captureMode, monSource, whisperChoice, contextDir, err = applyConfig(*saved, monitors)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 			os.Exit(1)
@@ -264,6 +333,9 @@ func main() {
 
 		renderer = selectRenderer(scanner)
 
+		overlayMonitor = selectOverlayMonitor(scanner, monitors, renderer)
+		overlayFullscreen = selectOverlayFullscreen(scanner, renderer)
+
 		lang = selectLanguage(scanner)
 
 		captureMode, monSource, err = SelectAudioMode(scanner)
@@ -274,18 +346,24 @@ func main() {
 
 		whisperChoice = selectWhisperModel(scanner)
 
+		contextDir = selectContextDir(scanner)
+
 		promptSaveConfig(scanner, AppConfig{
-			Monitor:      selected,
-			Provider:     providerChoiceFromScanner(provider),
-			Renderer:     rendererChoiceFromScanner(renderer),
-			Language:     languageChoiceFromString(lang),
-			AudioMode:    audioModeChoiceFromMode(captureMode),
-			MonSource:    monSource,
-			WhisperModel: whisperChoice,
+			Monitor:           selected,
+			OverlayMonitor:    overlayMonitor,
+			OverlayFullscreen: overlayFullscreen,
+			Provider:          providerChoiceFromScanner(provider),
+			Renderer:          rendererChoiceFromScanner(renderer),
+			Language:          languageChoiceFromString(lang),
+			AudioMode:         audioModeChoiceFromMode(captureMode),
+			MonSource:         monSource,
+			WhisperModel:      whisperChoice,
+			ContextDir:        contextDir,
 		})
 	}
 
 	provider.SetLanguage(lang)
+	provider.SetContextDir(contextDir)
 
 	whisperURL := os.Getenv("WHISPER_URL")
 	if whisperURL == "" {
@@ -321,12 +399,13 @@ func main() {
 		return provider.Summarize(summarizePrompt + text)
 	}
 	ac := NewAudioCapture(captureMode, monSource, whisperURL, renderer, summarizeFn)
+	var appState AppState
 	var micStopCh chan struct{}
 	var soundCheckOn atomic.Bool
 	var llmBusy atomic.Bool
 	dispatch := func() {
 		for action := range ch {
-			handleAction(action, selected, provider, renderer, recorder, ac, whisperURL, lang, &micStopCh, &soundCheckOn, &llmBusy)
+			handleAction(action, selected, provider, renderer, recorder, ac, whisperURL, lang, &appState, &micStopCh, &soundCheckOn, &llmBusy)
 		}
 	}
 
@@ -339,6 +418,13 @@ func main() {
 	}
 
 	overlay.SetProvider(provider)
+	if overlayMonitor >= 0 && overlayMonitor < len(monitors) {
+		m := monitors[overlayMonitor]
+		overlay.MoveToMonitor(m.X, m.Y)
+		if overlayFullscreen {
+			overlay.Fullscreen(m.X, m.Y, m.Width, m.Height)
+		}
+	}
 	overlay.SetToggleChunkHandler(func(id int, checked bool) {
 		ac.ToggleSelection(id, checked)
 	})
@@ -365,14 +451,14 @@ func main() {
 	teardownMPX()
 }
 
-func applyConfig(cfg AppConfig, monitors []MonitorInfo) (int, Provider, Renderer, string, CaptureMode, string, string, error) {
+func applyConfig(cfg AppConfig, monitors []MonitorInfo) (int, int, bool, Provider, Renderer, string, CaptureMode, string, string, string, error) {
 	if cfg.Monitor < 0 || cfg.Monitor >= len(monitors) {
-		return 0, nil, nil, "", 0, "", "", fmt.Errorf("saved monitor #%d no longer exists (%d available)", cfg.Monitor+1, len(monitors))
+		return 0, 0, false, nil, nil, "", 0, "", "", "", fmt.Errorf("saved monitor #%d no longer exists (%d available)", cfg.Monitor+1, len(monitors))
 	}
 
 	provider, err := providerFromChoice(cfg.Provider)
 	if err != nil {
-		return 0, nil, nil, "", 0, "", "", err
+		return 0, 0, false, nil, nil, "", 0, "", "", "", err
 	}
 
 	renderer := rendererFromChoice(cfg.Renderer)
@@ -380,7 +466,7 @@ func applyConfig(cfg AppConfig, monitors []MonitorInfo) (int, Provider, Renderer
 
 	captureMode, monSource, err := audioModeFromChoice(cfg.AudioMode, cfg.MonSource)
 	if err != nil {
-		return 0, nil, nil, "", 0, "", "", err
+		return 0, 0, false, nil, nil, "", 0, "", "", "", err
 	}
 
 	whisper := cfg.WhisperModel
@@ -388,7 +474,12 @@ func applyConfig(cfg AppConfig, monitors []MonitorInfo) (int, Provider, Renderer
 		whisper = "1"
 	}
 
-	return cfg.Monitor, provider, renderer, lang, captureMode, monSource, whisper, nil
+	overlayMon := cfg.OverlayMonitor
+	if overlayMon < 0 || overlayMon >= len(monitors) {
+		overlayMon = 0
+	}
+
+	return cfg.Monitor, overlayMon, cfg.OverlayFullscreen, provider, renderer, lang, captureMode, monSource, whisper, cfg.ContextDir, nil
 }
 
 func providerChoiceFromScanner(p Provider) string {
@@ -501,7 +592,7 @@ Transcript segment:
 `
 
 var helpLines = []helpLine{
-	{HotkeyCapture, "screen capture → solve"},
+	{HotkeyCapture, "screen capture (stores for process)"},
 	{HotkeyAudioCapture, "toggle audio capture (system audio)"},
 	{HotkeyFollowUp, "toggle mic recording"},
 	{HotkeyAudioSend, "process accumulated transcript via LLM"},
@@ -576,16 +667,9 @@ func findOverlay(r Renderer) *OverlayRenderer {
 	return nil
 }
 
-func handleAction(action HotkeyAction, monitorIdx int, provider Provider, renderer Renderer, recorder *Recorder, ac *AudioCapture, whisperURL string, lang string, micStopCh *chan struct{}, soundCheckOn *atomic.Bool, llmBusy *atomic.Bool) {
+func handleAction(action HotkeyAction, monitorIdx int, provider Provider, renderer Renderer, recorder *Recorder, ac *AudioCapture, whisperURL string, lang string, appState *AppState, micStopCh *chan struct{}, soundCheckOn *atomic.Bool, llmBusy *atomic.Bool) {
 	if action == HotkeyCapture {
-		if !llmBusy.CompareAndSwap(false, true) {
-			renderer.SetStatus("LLM busy")
-			return
-		}
-		go func() {
-			defer llmBusy.Store(false)
-			handleCapture(monitorIdx, provider, renderer)
-		}()
+		go handleCaptureStore(monitorIdx, renderer, appState)
 		return
 	}
 	if action == HotkeyFollowUp && *micStopCh != nil {
@@ -624,7 +708,7 @@ func handleAction(action HotkeyAction, monitorIdx int, provider Provider, render
 		}
 		go func() {
 			defer llmBusy.Store(false)
-			handleAudioSend(ac, provider, renderer, lang)
+			handleProcess(ac, provider, renderer, lang, appState)
 		}()
 		return
 	}
@@ -639,7 +723,7 @@ func handleAction(action HotkeyAction, monitorIdx int, provider Provider, render
 		}
 		go func() {
 			defer llmBusy.Store(false)
-			handleImplement(provider, renderer, ac, lang)
+			handleImplement(provider, renderer, lang)
 		}()
 		return
 	}
@@ -650,6 +734,8 @@ func handleAction(action HotkeyAction, monitorIdx int, provider Provider, render
 			recorder.Stop()
 			renderer.SetMicRecording(false)
 		}
+		appState.Clear()
+		ac.ClearAll()
 		provider.ClearHistory()
 		renderer.Clear()
 		return
@@ -663,25 +749,41 @@ Transcript:
 `
 }
 
-func handleAudioSend(ac *AudioCapture, provider Provider, renderer Renderer, lang string) {
+func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang string, appState *AppState) {
+	screenshot, hasScreen := appState.ConsumeScreenshot()
+
 	transcript := ac.BuildSelectedContext()
 	if transcript == "" {
 		transcript = ac.BuildContext()
 	}
-	if transcript == "" {
-		renderer.SetStatus("no transcript accumulated")
+
+	if !hasScreen && transcript == "" {
+		renderer.SetStatus("nothing to process")
 		return
 	}
 
-	renderer.SetStatus("sending transcript to LLM...")
 	renderer.AppendStreamStart()
-	_, err := provider.FollowUp(audioSendPrefix(lang)+transcript, func(delta string) {
-		renderer.AppendStreamDelta(delta)
-	})
-	if err != nil {
-		renderer.SetStatus("follow-up error: " + err.Error())
-		return
+
+	if hasScreen {
+		renderer.SetStatus("solving...")
+		_, err := provider.Solve(screenshot, transcript, func(delta string) {
+			renderer.AppendStreamDelta(delta)
+		})
+		if err != nil {
+			renderer.SetStatus("solve error: " + err.Error())
+			return
+		}
+	} else {
+		renderer.SetStatus("sending transcript to LLM...")
+		_, err := provider.FollowUp(audioSendPrefix(lang)+transcript, func(delta string) {
+			renderer.AppendStreamDelta(delta)
+		})
+		if err != nil {
+			renderer.SetStatus("follow-up error: " + err.Error())
+			return
+		}
 	}
+
 	renderer.AppendStreamDone()
 	renderer.SetStatus("")
 
@@ -780,14 +882,10 @@ func handleExplain(provider Provider, renderer Renderer) {
 	renderer.SetStatus("")
 }
 
-func handleImplement(provider Provider, renderer Renderer, ac *AudioCapture, lang string) {
-	transcript := ac.BuildContext()
+func handleImplement(provider Provider, renderer Renderer, lang string) {
 	fence := fenceLang(lang)
 	prompt := "Based on our conversation so far, please implement the complete, working solution in " + lang + ". " +
 		"Use markdown fenced code blocks (```" + fence + ") for all code. Keep explanations minimal."
-	if transcript != "" {
-		prompt += "\n\nAdditional context from audio transcript:\n" + transcript
-	}
 
 	renderer.SetStatus("implementing...")
 	renderer.AppendStreamStart()
@@ -814,6 +912,55 @@ func selectWhisperModel(scanner *bufio.Scanner) string {
 		return "2"
 	}
 	return "1"
+}
+
+func selectOverlayMonitor(scanner *bufio.Scanner, monitors []MonitorInfo, renderer Renderer) int {
+	if findOverlay(renderer) == nil {
+		return 0
+	}
+	if len(monitors) < 2 {
+		return 0
+	}
+	fmt.Println("\nOverlay monitor:")
+	for _, m := range monitors {
+		fmt.Printf("  %d: %s — %s (%s)\n", m.Index+1, m.Model, m.Output, m.Geom)
+	}
+	fmt.Print("Choice [1]: ")
+	scanner.Scan()
+	input := strings.TrimSpace(scanner.Text())
+	if input == "" {
+		return 0
+	}
+	idx, err := strconv.Atoi(input)
+	if err != nil || idx < 1 || idx > len(monitors) {
+		return 0
+	}
+	return idx - 1
+}
+
+func selectOverlayFullscreen(scanner *bufio.Scanner, renderer Renderer) bool {
+	if findOverlay(renderer) == nil {
+		return false
+	}
+	fmt.Print("\nOverlay fullscreen? (y/N): ")
+	scanner.Scan()
+	input := strings.TrimSpace(strings.ToLower(scanner.Text()))
+	return input == "y" || input == "yes"
+}
+
+func selectContextDir(scanner *bufio.Scanner) string {
+	fmt.Print("\nContext file or directory (Enter to skip): ")
+	scanner.Scan()
+	path := strings.TrimSpace(scanner.Text())
+	if path == "" {
+		return ""
+	}
+	_, err := os.Stat(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %q does not exist, skipping\n", path)
+		return ""
+	}
+	return path
 }
 
 func whisperModelPath(choice string) string {
@@ -918,18 +1065,6 @@ func whisperHealthy(whisperURL string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func teardownMPX() {
-	script := filepath.Join(filepath.Dir(os.Args[0]), "teardown-mpx.sh")
-	if _, err := os.Stat(script); err != nil {
-		return
-	}
-	out, err := exec.Command("bash", script).CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mpx teardown error: %v\n%s", err, out)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "%s", out)
-}
 
 func runVULoop(renderer Renderer, recorder *Recorder, ac *AudioCapture, soundCheck *atomic.Bool) {
 	ticker := time.NewTicker(33 * time.Millisecond)
@@ -976,29 +1111,20 @@ func handleSoundCheckToggle(recorder *Recorder, ac *AudioCapture, renderer Rende
 		return
 	}
 	if !ac.Active() {
-		ac.Toggle()
+		ac.StartSoundCheck()
 	}
 	on.Store(true)
 	renderer.SetSoundCheck(true)
 	renderer.SetStatus("sound check — speak or play audio...")
 }
 
-func handleCapture(monitorIdx int, provider Provider, renderer Renderer) {
+func handleCaptureStore(monitorIdx int, renderer Renderer, appState *AppState) {
 	renderer.SetStatus("capturing...")
 	imgData, err := captureMonitor(monitorIdx)
 	if err != nil {
 		renderer.SetStatus("capture error: " + err.Error())
 		return
 	}
-	renderer.SetStatus("solving...")
-	renderer.AppendStreamStart()
-	_, err = provider.Solve(imgData, func(delta string) {
-		renderer.AppendStreamDelta(delta)
-	})
-	if err != nil {
-		renderer.SetStatus("solve error: " + err.Error())
-		return
-	}
-	renderer.AppendStreamDone()
-	renderer.SetStatus("")
+	appState.SetScreenshot(imgData)
+	renderer.SetStatus("screen captured — ready to process")
 }

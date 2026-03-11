@@ -10,10 +10,11 @@ import (
 )
 
 type AnthropicProvider struct {
-	client  anthropic.Client
-	model   anthropic.Model
-	lang    string
-	history []anthropic.MessageParam
+	client     anthropic.Client
+	model      anthropic.Model
+	lang       string
+	contextDir string
+	history    []anthropic.MessageParam
 }
 
 func NewAnthropicProvider(model anthropic.Model) *AnthropicProvider {
@@ -24,6 +25,10 @@ func (p *AnthropicProvider) SetLanguage(lang string) {
 	p.lang = lang
 }
 
+func (p *AnthropicProvider) SetContextDir(dir string) {
+	p.contextDir = dir
+}
+
 func (p *AnthropicProvider) ClearHistory() {
 	p.history = nil
 }
@@ -32,12 +37,12 @@ func (p *AnthropicProvider) ModelName() string {
 	return string(p.model)
 }
 
-func (p *AnthropicProvider) Solve(pngData []byte, onDelta func(string)) (string, error) {
+func (p *AnthropicProvider) Solve(pngData []byte, transcript string, onDelta func(string)) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
 
 	p.history = append(p.history, anthropic.NewUserMessage(
 		anthropic.NewImageBlockBase64("image/jpeg", b64),
-		anthropic.NewTextBlock(buildSolvePrompt(p.lang)),
+		anthropic.NewTextBlock(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript)),
 	))
 
 	stream := p.client.Messages.NewStreaming(context.Background(), anthropic.MessageNewParams{
@@ -104,8 +109,9 @@ func (p *AnthropicProvider) Summarize(text string) (string, error) {
 }
 
 func (p *AnthropicProvider) FollowUp(text string, onDelta func(string)) (string, error) {
+	msg := readContextPath(p.contextDir) + text
 	p.history = append(p.history, anthropic.NewUserMessage(
-		anthropic.NewTextBlock(text),
+		anthropic.NewTextBlock(msg),
 	))
 
 	stream := p.client.Messages.NewStreaming(context.Background(), anthropic.MessageNewParams{

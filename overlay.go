@@ -37,6 +37,16 @@ static void set_no_focus(void *gtkWindow) {
 	gtk_window_set_focus_on_map(GTK_WINDOW(gtkWindow), FALSE);
 }
 
+static void move_window(void *gtkWindow, int x, int y) {
+	gtk_window_move(GTK_WINDOW(gtkWindow), x, y);
+}
+
+static void fullscreen_to_rect(void *gtkWindow, int x, int y, int w, int h) {
+	gtk_window_set_decorated(GTK_WINDOW(gtkWindow), FALSE);
+	gtk_window_move(GTK_WINDOW(gtkWindow), x, y);
+	gtk_window_resize(GTK_WINDOW(gtkWindow), w, h);
+}
+
 // Paint the window background as fully transparent.
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
 	(void)widget; (void)data;
@@ -94,6 +104,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -111,6 +123,7 @@ import (
 
 type OverlayRenderer struct {
 	w         webview.WebView
+	gtkWin    unsafe.Pointer
 	md        goldmark.Markdown
 	chromaCS  string
 	streamBuf strings.Builder
@@ -120,7 +133,8 @@ type OverlayRenderer struct {
 	onAction      func(HotkeyAction)
 	onToggleChunk func(int, bool)
 	provider      Provider
-	vuJS      atomic.Pointer[string]
+	vuJS   atomic.Pointer[string]
+	fsGeom atomic.Pointer[[4]int]
 
 	sandboxMu   sync.Mutex
 	sandboxCode string
@@ -144,6 +158,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 
 	o := &OverlayRenderer{
 		w:        w,
+		gtkWin:   unsafe.Pointer(gtkWin),
 		md:       newMarkdownRenderer(),
 		chromaCS: generateChromaCSS(),
 	}
@@ -170,6 +185,47 @@ func NewOverlayRenderer() *OverlayRenderer {
 			return
 		}
 		o.onToggleChunk(id, checked)
+	})
+
+	w.Bind("_listMice", func() string {
+		mice := listMice()
+		b, _ := json.Marshal(mice)
+		return string(b)
+	})
+
+	w.Bind("_isMPXActive", func() bool {
+		return isMPXActive()
+	})
+
+	w.Bind("_setupMPX", func(deviceID string) {
+		go func() {
+			if err := setupMPX(deviceID); err != nil {
+				AppLog.Error("mpx: %v", err)
+				return
+			}
+			o.eval("document.getElementById('btn-setup').textContent='Setup \u2713';")
+		}()
+	})
+
+	w.Bind("_teardownMPX", func() {
+		go func() {
+			teardownMPX()
+			o.eval("document.getElementById('btn-setup').textContent='Setup';")
+		}()
+	})
+
+	w.Bind("_selectContext", func(mode string) {
+		go func() {
+			path := pickPath(mode)
+			if path == "" {
+				return
+			}
+			if o.provider != nil {
+				o.provider.SetContextDir(path)
+			}
+			label := filepath.Base(path)
+			o.eval(`document.getElementById('btn-context').textContent=` + jsString("ctx: "+label) + `;`)
+		}()
 	})
 
 	// Bind a JS-callable function that drains pending JS updates.
@@ -320,6 +376,15 @@ func (o *OverlayRenderer) SetToggleChunkHandler(fn func(int, bool)) {
 
 func (o *OverlayRenderer) SetProvider(p Provider) { o.provider = p }
 
+func (o *OverlayRenderer) MoveToMonitor(x, y int) {
+	C.move_window(o.gtkWin, C.int(x), C.int(y))
+}
+
+func (o *OverlayRenderer) Fullscreen(x, y, w, h int) {
+	g := [4]int{x, y, w, h}
+	o.fsGeom.Store(&g)
+}
+
 // eval queues a JS snippet to be executed on the next poll cycle.
 func (o *OverlayRenderer) eval(js string) {
 	if o.closed.Load() {
@@ -339,6 +404,10 @@ func (o *OverlayRenderer) Run() {
 		}
 		if err := setAlwaysOnTop(xid); err != nil {
 			fmt.Printf("warning: could not set always-on-top: %v\n", err)
+		}
+		g := o.fsGeom.Load()
+		if g != nil {
+			C.fullscreen_to_rect(o.gtkWin, C.int(g[0]), C.int(g[1]), C.int(g[2]), C.int(g[3]))
 		}
 	})
 	o.w.Run()
@@ -451,16 +520,15 @@ func (o *OverlayRenderer) SetAudioRecording(recording bool) {
 }
 
 func (o *OverlayRenderer) SetSoundCheck(active bool) {
-	scLabel := keyLabels[HotkeySoundCheck]
-	label := escapeHTML(scLabel)
+	label := "Setup"
 	bg, color := "''", "''"
 	vuDisplay := "'none'"
 	if active {
-		label = `<span class="rec-dot"></span>` + escapeHTML(scLabel)
+		label = `<span class="rec-dot"></span>Setup`
 		bg, color = "'rgba(220,50,50,0.7)'", "'#fff'"
 		vuDisplay = "'flex'"
 	}
-	js := fmt.Sprintf(`var b=document.getElementById('btn-soundcheck');if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`+
+	js := fmt.Sprintf(`var b=document.getElementById('btn-setup');if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`+
 		`document.getElementById('vu-meters').style.display=%s;`, bg, color, jsString(label), vuDisplay)
 	o.eval(js)
 }
@@ -496,7 +564,9 @@ func (o *OverlayRenderer) Clear() {
 }
 
 func (o *OverlayRenderer) Close() {
-	o.closed.Store(true)
+	if !o.closed.CompareAndSwap(false, true) {
+		return
+	}
 	o.w.Terminate()
 }
 
@@ -642,6 +712,10 @@ body {
 }
 #footer-btns button:hover { background:rgba(255,255,255,0.18); color:#fff; }
 #footer-btns button:active { background:rgba(255,255,255,0.25); }
+#footer-btns { position:relative; }
+.ctx-popup { position:absolute; bottom:100%; left:50%; transform:translateX(-50%); background:#2a2a2a; border:1px solid #555; border-radius:4px; z-index:999; margin-bottom:4px; }
+.ctx-popup div { padding:6px 14px; cursor:pointer; white-space:nowrap; font-size:11px; color:#ccc; }
+.ctx-popup div:hover { background:#444; color:#fff; }
 #vu-meters { display:none; gap:8px; padding:2px 12px; align-items:center; }
 .vu-label { font-size:9px; color:#888; width:32px; }
 .vu-track { flex:1; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden; }
@@ -707,7 +781,7 @@ body {
   <div class="vu-track"><div id="vu-audio" class="vu-fill"></div></div>
 </div>
 <div id="footer-btns">
-` + buildFooterButtons() + `
+` + buildFooterButtons() + `<button id="btn-context" onclick="_showCtxMenu(event)">ctx</button><button id="btn-setup" onclick="_showSetupMenu(event)">Setup</button>
 </div></div>
 <script>
 (function(){
@@ -720,6 +794,50 @@ body {
   };
   document.onmouseup=function(){d=false};
 })();
+window._ctxMenu=null;
+window._showCtxMenu=function(e){
+  e.stopPropagation();
+  if(_ctxMenu){_ctxMenu.remove();_ctxMenu=null;return;}
+  var m=document.createElement('div');
+  m.className='ctx-popup';
+  m.innerHTML='<div onclick="_selectContext(\'dir\')">Directory</div><div onclick="_selectContext(\'file\')">File</div>';
+  document.getElementById('footer-btns').appendChild(m);
+  _ctxMenu=m;
+  setTimeout(function(){document.addEventListener('click',function h(){if(_ctxMenu){_ctxMenu.remove();_ctxMenu=null;}document.removeEventListener('click',h);});},0);
+};
+window._setupMenu=null;
+window._closeSetup=function(){if(_setupMenu){_setupMenu.remove();_setupMenu=null;}};
+window._showSetupMenu=function(e){
+  e.stopPropagation();
+  if(_setupMenu){_closeSetup();return;}
+  var m=document.createElement('div');
+  m.className='ctx-popup';
+  m.innerHTML='<div id="btn-soundcheck" onclick="_action(\'soundcheck\')">Sound Check</div><div onclick="_showMPXSub()">Mouse (MPX)</div>';
+  document.getElementById('footer-btns').appendChild(m);
+  _setupMenu=m;
+  setTimeout(function(){document.addEventListener('click',function h(){_closeSetup();document.removeEventListener('click',h);});},0);
+};
+window._showMPXSub=function(){
+  _closeSetup();
+  _isMPXActive().then(function(active){
+    if(active){_teardownMPX();return;}
+    _listMice().then(function(raw){
+      var mice=JSON.parse(raw);
+      if(!mice||!mice.length)return;
+      var m=document.createElement('div');
+      m.className='ctx-popup';
+      for(var i=0;i<mice.length;i++){(function(mouse){
+        var d=document.createElement('div');
+        d.textContent=mouse.Name+' ('+mouse.ID+')';
+        d.onclick=function(){_setupMPX(mouse.ID);_closeSetup();};
+        m.appendChild(d);
+      })(mice[i]);}
+      document.getElementById('footer-btns').appendChild(m);
+      _setupMenu=m;
+      setTimeout(function(){document.addEventListener('click',function h(){_closeSetup();document.removeEventListener('click',h);});},0);
+    });
+  });
+};
 window._autoSize=function(el){el.style.height='auto';el.style.height=el.scrollHeight+'px';};
 window._hlTimers={};
 window._syncHighlight=function(taId,hlId){
@@ -880,7 +998,7 @@ func vuColor(level float64) string {
 var buttonIDs = map[HotkeyAction]string{
 	HotkeyFollowUp:     "btn-voice",
 	HotkeyAudioCapture: "btn-audio",
-	HotkeySoundCheck:   "btn-soundcheck",
+	HotkeySoundCheck:   "btn-setup",
 }
 
 func buildFooterButtons() string {
@@ -908,4 +1026,16 @@ func escapeHTML(s string) string {
 func jsString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func pickPath(mode string) string {
+	args := []string{"--file-selection", "--title=Select context"}
+	if mode == "dir" {
+		args = append(args, "--directory")
+	}
+	out, err := exec.Command("zenity", args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

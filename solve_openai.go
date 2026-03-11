@@ -15,6 +15,7 @@ type OpenAIProvider struct {
 	client             openai.Client
 	model              shared.ResponsesModel
 	lang               string
+	contextDir         string
 	previousResponseID string
 }
 
@@ -26,6 +27,10 @@ func (p *OpenAIProvider) SetLanguage(lang string) {
 	p.lang = lang
 }
 
+func (p *OpenAIProvider) SetContextDir(dir string) {
+	p.contextDir = dir
+}
+
 func (p *OpenAIProvider) ClearHistory() {
 	p.previousResponseID = ""
 }
@@ -34,7 +39,7 @@ func (p *OpenAIProvider) ModelName() string {
 	return string(p.model)
 }
 
-func (p *OpenAIProvider) Solve(pngData []byte, onDelta func(string)) (string, error) {
+func (p *OpenAIProvider) Solve(pngData []byte, transcript string, onDelta func(string)) (string, error) {
 	b64 := base64.StdEncoding.EncodeToString(pngData)
 	dataURL := "data:image/jpeg;base64," + b64
 
@@ -47,7 +52,7 @@ func (p *OpenAIProvider) Solve(pngData []byte, onDelta func(string)) (string, er
 					Role: "user",
 					Content: responses.EasyInputMessageContentUnionParam{
 						OfInputItemContentList: responses.ResponseInputMessageContentListParam{
-							responses.ResponseInputContentParamOfInputText(buildSolvePrompt(p.lang)),
+							responses.ResponseInputContentParamOfInputText(buildSolvePrompt(p.lang, readContextPath(p.contextDir), transcript)),
 							{OfInputImage: &responses.ResponseInputImageParam{
 								ImageURL: openai.String(dataURL),
 								Detail:   "high",
@@ -123,6 +128,7 @@ func (p *OpenAIProvider) Summarize(text string) (string, error) {
 }
 
 func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, error) {
+	msg := readContextPath(p.contextDir) + text
 	params := responses.ResponseNewParams{
 		Model:           p.model,
 		MaxOutputTokens: openai.Int(4096),
@@ -132,7 +138,7 @@ func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, er
 					Role: "user",
 					Content: responses.EasyInputMessageContentUnionParam{
 						OfInputItemContentList: responses.ResponseInputMessageContentListParam{
-							responses.ResponseInputContentParamOfInputText(text),
+							responses.ResponseInputContentParamOfInputText(msg),
 						},
 					},
 				}},

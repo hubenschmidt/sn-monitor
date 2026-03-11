@@ -37,7 +37,6 @@ var keyOrder = []HotkeyAction{
 	HotkeyAudioCapture,
 	HotkeyFollowUp,
 	HotkeyAudioSend,
-	HotkeySoundCheck,
 	HotkeyImplement,
 	HotkeyClear,
 }

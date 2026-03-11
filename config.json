@@ -1,27 +1,10 @@
 {
   "configs": [
     {
-      "name": "JavaScript-Zoom4-GPT-5-4",
+      "name": "dev-mode",
       "monitor": 0,
-      "provider": "3",
-      "renderer": "3",
-      "language": "2",
-      "audio_mode": "3",
-      "mon_source": "alsa_output.usb-ZOOM_Corporation_R24_0-00.analog-stereo.monitor"
-    },
-    {
-      "name": "new-zoom3",
-      "monitor": 0,
-      "provider": "3",
-      "renderer": "3",
-      "language": "2",
-      "audio_mode": "3",
-      "mon_source": "alsa_output.usb-ZOOM_Corporation_R24_0-00.analog-stereo.monitor",
-      "whisper_model": "1"
-    },
-    {
-      "name": "new-one",
-      "monitor": 0,
+      "overlay_monitor": 1,
+      "overlay_fullscreen": true,
       "provider": "3",
       "renderer": "3",
       "language": "2",
