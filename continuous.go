@@ -17,10 +17,13 @@ const (
 	silenceThreshold   = 500.0
 	minChunkDuration    = 12 * time.Second
 	maxChunkDuration    = 25 * time.Second
-	micMinChunkDuration = 5 * time.Second
+	micMinChunkDuration = 3 * time.Second
 	micMaxChunkDuration = 15 * time.Second
 	pollInterval        = 200 * time.Millisecond
 	silenceWindow       = 32000 // 2s at 16kHz — wider to avoid fragmenting on natural pauses
+	micSilenceWindow    = 12000 // 0.75s at 16kHz — tighter for low-latency mic transcription
+	micPollInterval     = 100 * time.Millisecond
+	dedupWindow        = 2 * time.Second
 	summarizeThreshold = 3000  // chars of raw text before triggering summarization
 	maxSummaryChars    = 16000 // ~4K tokens budget for summary history
 	maxRawChars        = 16000 // ~4K tokens budget for recent raw
@@ -32,6 +35,11 @@ const (
 type TranscriptEntry struct {
 	ID   int
 	Text string
+}
+
+type micStamp struct {
+	text string
+	at   time.Time
 }
 
 // AudioCapture records audio continuously, transcribes in chunks,
@@ -55,6 +63,7 @@ type AudioCapture struct {
 	entries      []TranscriptEntry
 	selected     map[int]bool
 	nextID       int
+	micRecent    []micStamp
 }
 
 func NewAudioCapture(mode CaptureMode, monSource string, whisperURL string, renderer Renderer, summarize SummarizeFn) *AudioCapture {
@@ -228,6 +237,10 @@ func (ac *AudioCapture) TranscribeNow() {
 	if trimmed == "" {
 		return
 	}
+	if ac.isMicDuplicate(trimmed) {
+		fmt.Printf("[audio-capture] suppressed mic duplicate: %q\n", trimmed)
+		return
+	}
 
 	ac.mu.Lock()
 	ac.rawChunks = append(ac.rawChunks, trimmed)
@@ -370,16 +383,46 @@ func (ac *AudioCapture) ClearAll() {
 	ac.mu.Unlock()
 }
 
+// RecordMicText logs a mic transcript for dedup against system audio bleed.
+func (ac *AudioCapture) RecordMicText(text string) {
+	ac.mu.Lock()
+	ac.micRecent = append(ac.micRecent, micStamp{text: strings.ToLower(text), at: time.Now()})
+	ac.mu.Unlock()
+}
+
+// isMicDuplicate returns true if text matches a recent mic transcript within dedupWindow.
+func (ac *AudioCapture) isMicDuplicate(text string) bool {
+	now := time.Now()
+	lower := strings.ToLower(text)
+
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
+	// Prune expired entries from the front
+	cutoff := 0
+	for cutoff < len(ac.micRecent) && now.Sub(ac.micRecent[cutoff].at) > dedupWindow {
+		cutoff++
+	}
+	ac.micRecent = ac.micRecent[cutoff:]
+
+	for _, m := range ac.micRecent {
+		if m.text == lower {
+			return true
+		}
+	}
+	return false
+}
+
 // RunChunkLoop polls for silence-based chunk boundaries while active.
 // Must be called in a goroutine.
 func (ac *AudioCapture) RunChunkLoop() {
-	runChunkLoop(minChunkDuration, maxChunkDuration, ac.recorder, ac.stopCh, ac.TranscribeNow)
+	runChunkLoop(minChunkDuration, maxChunkDuration, silenceWindow, silenceThreshold, pollInterval, ac.recorder, ac.stopCh, ac.TranscribeNow)
 }
 
 // runChunkLoop is a generic chunk-boundary poller parameterized by timing,
 // recorder, stop channel, and a transcribe callback.
-func runChunkLoop(minDur, maxDur time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
-	ticker := time.NewTicker(pollInterval)
+func runChunkLoop(minDur, maxDur time.Duration, silenceWin int, silenceThresh float64, poll time.Duration, recorder *Recorder, stopCh <-chan struct{}, transcribe func()) {
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
 	chunkStart := time.Now()
@@ -393,7 +436,7 @@ func runChunkLoop(minDur, maxDur time.Duration, recorder *Recorder, stopCh <-cha
 
 		elapsed := time.Since(chunkStart)
 		forced := elapsed >= maxDur
-		silent := elapsed >= minDur && recorder.PeekTailRMS(silenceWindow) < silenceThreshold
+		silent := elapsed >= minDur && recorder.PeekTailRMS(silenceWin) < silenceThresh
 
 		if forced || silent {
 			transcribe()

@@ -780,7 +780,7 @@ func handleMicStart(recorder *Recorder, renderer Renderer, ac *AudioCapture, whi
 	}
 
 	stopCh := make(chan struct{})
-	go runChunkLoop(micMinChunkDuration, micMaxChunkDuration, recorder, stopCh, func() {
+	go runChunkLoop(micMinChunkDuration, micMaxChunkDuration, micSilenceWindow, silenceThreshold, micPollInterval, recorder, stopCh, func() {
 		micTranscribeChunk(recorder, renderer, ac, whisperURL)
 	})
 	return stopCh
@@ -806,6 +806,7 @@ func transcribeAndAppend(samples []int16, renderer Renderer, ac *AudioCapture, w
 	if trimmed == "" {
 		return false
 	}
+	ac.RecordMicText(trimmed)
 	id := ac.AddEntry(trimmed)
 	ac.AppendTranscript(trimmed)
 	renderer.AppendTranscriptChunk("mic", trimmed, id)
