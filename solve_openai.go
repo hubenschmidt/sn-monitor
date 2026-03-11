@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/packages/ssestream"
 	"github.com/openai/openai-go/responses"
 	"github.com/openai/openai-go/shared"
 )
@@ -31,12 +32,37 @@ func (p *OpenAIProvider) SetContextDir(dir string) {
 	p.contextDir = dir
 }
 
+func (p *OpenAIProvider) ContextDir() string {
+	return p.contextDir
+}
+
 func (p *OpenAIProvider) ClearHistory() {
 	p.previousResponseID = ""
 }
 
 func (p *OpenAIProvider) ModelName() string {
 	return string(p.model)
+}
+
+func streamResponses(stream *ssestream.Stream[responses.ResponseStreamEventUnion], onDelta func(string)) (string, string, error) {
+	var buf strings.Builder
+	var responseID string
+	for stream.Next() {
+		evt := stream.Current()
+		if evt.Type == "response.output_text.delta" {
+			buf.WriteString(evt.Delta.OfString)
+			if onDelta != nil {
+				onDelta(evt.Delta.OfString)
+			}
+		}
+		if evt.Type == "response.completed" {
+			responseID = evt.Response.ID
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", "", fmt.Errorf("api call failed: %w", err)
+	}
+	return buf.String(), responseID, nil
 }
 
 func (p *OpenAIProvider) Solve(pngData []byte, transcript string, onDelta func(string)) (string, error) {
@@ -70,26 +96,14 @@ func (p *OpenAIProvider) Solve(pngData []byte, transcript string, onDelta func(s
 
 	stream := p.client.Responses.NewStreaming(context.Background(), params)
 
-	var buf strings.Builder
-	for stream.Next() {
-		evt := stream.Current()
-		if evt.Type == "response.output_text.delta" {
-			buf.WriteString(evt.Delta.OfString)
-			onDelta(evt.Delta.OfString)
-		}
-		if evt.Type == "response.completed" {
-			p.previousResponseID = evt.Response.ID
-		}
+	text, respID, err := streamResponses(stream, onDelta)
+	if err != nil {
+		return "", err
 	}
-
-	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("api call failed: %w", err)
-	}
-
-	text := buf.String()
 	if text == "" {
 		return "", fmt.Errorf("no text in response")
 	}
+	p.previousResponseID = respID
 	return text, nil
 }
 
@@ -112,19 +126,11 @@ func (p *OpenAIProvider) Summarize(text string) (string, error) {
 	}
 
 	stream := p.client.Responses.NewStreaming(context.Background(), params)
-
-	var buf strings.Builder
-	for stream.Next() {
-		evt := stream.Current()
-		if evt.Type == "response.output_text.delta" {
-			buf.WriteString(evt.Delta.OfString)
-		}
-	}
-
-	if err := stream.Err(); err != nil {
+	result, _, err := streamResponses(stream, nil)
+	if err != nil {
 		return "", fmt.Errorf("summarize failed: %w", err)
 	}
-	return buf.String(), nil
+	return result, nil
 }
 
 func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, error) {
@@ -152,25 +158,13 @@ func (p *OpenAIProvider) FollowUp(text string, onDelta func(string)) (string, er
 
 	stream := p.client.Responses.NewStreaming(context.Background(), params)
 
-	var buf strings.Builder
-	for stream.Next() {
-		evt := stream.Current()
-		if evt.Type == "response.output_text.delta" {
-			buf.WriteString(evt.Delta.OfString)
-			onDelta(evt.Delta.OfString)
-		}
-		if evt.Type == "response.completed" {
-			p.previousResponseID = evt.Response.ID
-		}
+	reply, respID, err := streamResponses(stream, onDelta)
+	if err != nil {
+		return "", err
 	}
-
-	if err := stream.Err(); err != nil {
-		return "", fmt.Errorf("api call failed: %w", err)
-	}
-
-	reply := buf.String()
 	if reply == "" {
 		return "", fmt.Errorf("no text in response")
 	}
+	p.previousResponseID = respID
 	return reply, nil
 }

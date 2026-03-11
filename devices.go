@@ -22,14 +22,9 @@ func ListMonitorSources() ([]PulseSource, error) {
 	var monitors []PulseSource
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
+		if len(fields) >= 2 && strings.HasSuffix(fields[1], ".monitor") {
+			monitors = append(monitors, PulseSource{ID: fields[0], Name: fields[1]})
 		}
-		name := fields[1]
-		if !strings.HasSuffix(name, ".monitor") {
-			continue
-		}
-		monitors = append(monitors, PulseSource{ID: fields[0], Name: name})
 	}
 	return monitors, nil
 }

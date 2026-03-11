@@ -152,55 +152,43 @@ func handleDeleteConfig(idxStr string, configs []AppConfig) []AppConfig {
 	return configs
 }
 
+func labelOr(m map[string]string, key, fallback string) string {
+	if v := m[key]; v != "" {
+		return v
+	}
+	return fallback
+}
+
+func monitorLabel(idx int, monitors []MonitorInfo, fallback string) string {
+	if idx >= 0 && idx < len(monitors) {
+		return fmt.Sprintf("%s (%s)", monitors[idx].Model, monitors[idx].Output)
+	}
+	return fallback
+}
+
 func printConfigs(configs []AppConfig, monitors []MonitorInfo) {
 	fmt.Println("\nSaved configurations:")
 	for i, c := range configs {
-		monLabel := fmt.Sprintf("#%d", c.Monitor+1)
-		if c.Monitor >= 0 && c.Monitor < len(monitors) {
-			m := monitors[c.Monitor]
-			monLabel = fmt.Sprintf("%s (%s)", m.Model, m.Output)
-		}
-		prov := providerLabels[c.Provider]
-		if prov == "" {
-			prov = "?"
-		}
-		rend := rendererLabels[c.Renderer]
-		if rend == "" {
-			rend = "?"
-		}
-		lang := languages[c.Language]
-		if lang == "" {
-			lang = "?"
-		}
-		audio := audioModeLabels[c.AudioMode]
-		if audio == "" {
-			audio = "?"
-		}
+		prov := labelOr(providerLabels, c.Provider, "?")
+		rend := labelOr(rendererLabels, c.Renderer, "?")
+		lang := labelOr(languages, c.Language, "?")
+		audio := labelOr(audioModeLabels, c.AudioMode, "?")
 		if c.MonSource != "" {
 			audio += " (" + c.MonSource + ")"
 		}
-		wm := whisperModels[c.WhisperModel]
-		wmLabel := wm.label
-		if wmLabel == "" {
-			wmLabel = whisperModels["1"].label
-		}
-		fmt.Printf("  %d: %q\n", i+1, c.Name)
-		fmt.Printf("     Monitor: %s | Model: %s | Output: %s\n", monLabel, prov, rend)
+		wm := whisperModel(c.WhisperModel)
 		ctxDir := c.ContextDir
 		if ctxDir == "" {
 			ctxDir = "(none)"
 		}
-		overlayLabel := fmt.Sprintf("#%d", c.OverlayMonitor+1)
-		if c.OverlayMonitor >= 0 && c.OverlayMonitor < len(monitors) {
-			om := monitors[c.OverlayMonitor]
-			overlayLabel = fmt.Sprintf("%s (%s)", om.Model, om.Output)
-		}
-		fmt.Printf("     Language: %s | Audio: %s | Whisper: %s\n", lang, audio, wmLabel)
 		fsLabel := "no"
 		if c.OverlayFullscreen {
 			fsLabel = "yes"
 		}
-		fmt.Printf("     Overlay: %s (fullscreen: %s) | Context: %s\n", overlayLabel, fsLabel, ctxDir)
+		fmt.Printf("  %d: %q\n", i+1, c.Name)
+		fmt.Printf("     Monitor: %s | Model: %s | Output: %s\n", monitorLabel(c.Monitor, monitors, fmt.Sprintf("#%d", c.Monitor+1)), prov, rend)
+		fmt.Printf("     Language: %s | Audio: %s | Whisper: %s\n", lang, audio, wm.label)
+		fmt.Printf("     Overlay: %s (fullscreen: %s) | Context: %s\n", monitorLabel(c.OverlayMonitor, monitors, fmt.Sprintf("#%d", c.OverlayMonitor+1)), fsLabel, ctxDir)
 	}
 }
 
@@ -529,18 +517,7 @@ func selectProvider(scanner *bufio.Scanner) (Provider, error) {
 	fmt.Println("  3: GPT-5.4 (OpenAI)")
 	fmt.Print("Choice [1]: ")
 	scanner.Scan()
-
-	input := strings.TrimSpace(scanner.Text())
-	if input == "" || input == "1" {
-		return newAnthropicProvider("claude-opus-4-6")
-	}
-	if input == "2" {
-		return newOpenAIProvider("gpt-5.3-codex")
-	}
-	if input == "3" {
-		return newOpenAIProvider("gpt-5.4")
-	}
-	return nil, fmt.Errorf("invalid model selection: %s", input)
+	return providerFromChoice(strings.TrimSpace(scanner.Text()))
 }
 
 func newAnthropicProvider(model string) (Provider, error) {
@@ -564,18 +541,7 @@ func selectRenderer(scanner *bufio.Scanner) Renderer {
 	fmt.Println("  3: Both")
 	fmt.Print("Choice [1]: ")
 	scanner.Scan()
-
-	input := strings.TrimSpace(scanner.Text())
-	if input == "2" {
-		return NewOverlayRenderer()
-	}
-	if input == "3" {
-		return &MultiRenderer{renderers: []Renderer{
-			&TerminalRenderer{},
-			NewOverlayRenderer(),
-		}}
-	}
-	return &TerminalRenderer{}
+	return rendererFromChoice(strings.TrimSpace(scanner.Text()))
 }
 
 type helpLine struct {
@@ -667,79 +633,80 @@ func findOverlay(r Renderer) *OverlayRenderer {
 	return nil
 }
 
+func stopMic(recorder *Recorder, renderer Renderer, micStopCh *chan struct{}) {
+	if *micStopCh == nil {
+		return
+	}
+	close(*micStopCh)
+	*micStopCh = nil
+	recorder.Stop()
+	renderer.SetMicRecording(false)
+}
+
+func llmGuardAsync(llmBusy *atomic.Bool, renderer Renderer, fn func()) {
+	if !llmBusy.CompareAndSwap(false, true) {
+		renderer.SetStatus("LLM busy")
+		return
+	}
+	go func() {
+		defer llmBusy.Store(false)
+		fn()
+	}()
+}
+
 func handleAction(action HotkeyAction, monitorIdx int, provider Provider, renderer Renderer, recorder *Recorder, ac *AudioCapture, whisperURL string, lang string, appState *AppState, micStopCh *chan struct{}, soundCheckOn *atomic.Bool, llmBusy *atomic.Bool) {
-	if action == HotkeyCapture {
-		go handleCaptureStore(monitorIdx, renderer, appState)
+	handlers := map[HotkeyAction]func(){
+		HotkeyCapture: func() {
+			go handleCaptureStore(monitorIdx, renderer, appState)
+		},
+		HotkeyFollowUp: func() {
+			if *micStopCh != nil {
+				handleMicStop(recorder, renderer, ac, whisperURL, micStopCh)
+				renderer.SetMicRecording(false)
+				return
+			}
+			*micStopCh = handleMicStart(recorder, renderer, ac, whisperURL)
+			renderer.SetMicRecording(true)
+		},
+		HotkeyExplain: func() {
+			llmGuardAsync(llmBusy, renderer, func() {
+				handleExplain(provider, renderer)
+			})
+		},
+		HotkeyAudioCapture: func() {
+			ac.Toggle()
+			renderer.SetAudioRecording(ac.Active())
+			if ac.Active() {
+				go ac.RunChunkLoop()
+			}
+		},
+		HotkeyAudioSend: func() {
+			llmGuardAsync(llmBusy, renderer, func() {
+				handleProcess(ac, provider, renderer, lang, appState)
+			})
+		},
+		HotkeySoundCheck: func() {
+			handleSoundCheckToggle(recorder, ac, renderer, soundCheckOn)
+		},
+		HotkeyImplement: func() {
+			llmGuardAsync(llmBusy, renderer, func() {
+				handleImplement(provider, renderer, lang)
+			})
+		},
+		HotkeyClear: func() {
+			stopMic(recorder, renderer, micStopCh)
+			appState.Clear()
+			ac.ClearAll()
+			provider.ClearHistory()
+			renderer.Clear()
+		},
+	}
+
+	fn, ok := handlers[action]
+	if !ok {
 		return
 	}
-	if action == HotkeyFollowUp && *micStopCh != nil {
-		handleMicStop(recorder, renderer, ac, whisperURL, micStopCh)
-		renderer.SetMicRecording(false)
-		return
-	}
-	if action == HotkeyFollowUp {
-		*micStopCh = handleMicStart(recorder, renderer, ac, whisperURL)
-		renderer.SetMicRecording(true)
-		return
-	}
-	if action == HotkeyExplain {
-		if !llmBusy.CompareAndSwap(false, true) {
-			renderer.SetStatus("LLM busy")
-			return
-		}
-		go func() {
-			defer llmBusy.Store(false)
-			handleExplain(provider, renderer)
-		}()
-		return
-	}
-	if action == HotkeyAudioCapture {
-		ac.Toggle()
-		renderer.SetAudioRecording(ac.Active())
-		if ac.Active() {
-			go ac.RunChunkLoop()
-		}
-		return
-	}
-	if action == HotkeyAudioSend {
-		if !llmBusy.CompareAndSwap(false, true) {
-			renderer.SetStatus("LLM busy")
-			return
-		}
-		go func() {
-			defer llmBusy.Store(false)
-			handleProcess(ac, provider, renderer, lang, appState)
-		}()
-		return
-	}
-	if action == HotkeySoundCheck {
-		handleSoundCheckToggle(recorder, ac, renderer, soundCheckOn)
-		return
-	}
-	if action == HotkeyImplement {
-		if !llmBusy.CompareAndSwap(false, true) {
-			renderer.SetStatus("LLM busy")
-			return
-		}
-		go func() {
-			defer llmBusy.Store(false)
-			handleImplement(provider, renderer, lang)
-		}()
-		return
-	}
-	if action == HotkeyClear {
-		if *micStopCh != nil {
-			close(*micStopCh)
-			*micStopCh = nil
-			recorder.Stop()
-			renderer.SetMicRecording(false)
-		}
-		appState.Clear()
-		ac.ClearAll()
-		provider.ClearHistory()
-		renderer.Clear()
-		return
-	}
+	fn()
 }
 
 func audioSendPrefix(lang string) string {
@@ -749,15 +716,27 @@ Transcript:
 `
 }
 
+func finishStream(renderer Renderer, ac *AudioCapture) {
+	renderer.AppendStreamDone()
+	renderer.SetStatus("")
+	ac.ClearSelections()
+	renderer.ClearTranscriptCheckboxes()
+}
+
 func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang string, appState *AppState) {
 	screenshot, hasScreen := appState.ConsumeScreenshot()
+	if hasScreen {
+		renderer.SetScreenLoaded(false)
+	}
 
 	transcript := ac.BuildSelectedContext()
 	if transcript == "" {
 		transcript = ac.BuildContext()
 	}
 
-	if !hasScreen && transcript == "" {
+	hasContext := provider.ContextDir() != ""
+
+	if !hasScreen && transcript == "" && !hasContext {
 		renderer.SetStatus("nothing to process")
 		return
 	}
@@ -773,22 +752,24 @@ func handleProcess(ac *AudioCapture, provider Provider, renderer Renderer, lang 
 			renderer.SetStatus("solve error: " + err.Error())
 			return
 		}
-	} else {
-		renderer.SetStatus("sending transcript to LLM...")
-		_, err := provider.FollowUp(audioSendPrefix(lang)+transcript, func(delta string) {
-			renderer.AppendStreamDelta(delta)
-		})
-		if err != nil {
-			renderer.SetStatus("follow-up error: " + err.Error())
-			return
-		}
+		finishStream(renderer, ac)
+		return
 	}
 
-	renderer.AppendStreamDone()
-	renderer.SetStatus("")
-
-	ac.ClearSelections()
-	renderer.ClearTranscriptCheckboxes()
+	fence := fenceLang(lang)
+	prompt := "Based on the provided context files, first analyze the problem and requirements, then implement the complete working solution in " + lang + ". Use markdown fenced code blocks (```" + fence + ") for all code.\n\n" + codeRules
+	if transcript != "" {
+		prompt = audioSendPrefix(lang) + transcript + "\n\n" + codeRules
+	}
+	renderer.SetStatus("sending to LLM...")
+	_, err := provider.FollowUp(prompt, func(delta string) {
+		renderer.AppendStreamDelta(delta)
+	})
+	if err != nil {
+		renderer.SetStatus("follow-up error: " + err.Error())
+		return
+	}
+	finishStream(renderer, ac)
 }
 
 func handleMicStart(recorder *Recorder, renderer Renderer, ac *AudioCapture, whisperURL string) chan struct{} {
@@ -805,67 +786,46 @@ func handleMicStart(recorder *Recorder, renderer Renderer, ac *AudioCapture, whi
 	return stopCh
 }
 
+func transcribeAndAppend(samples []int16, renderer Renderer, ac *AudioCapture, whisperURL, statusPrefix string) bool {
+	if len(samples) == 0 {
+		return false
+	}
+	chunkRMS := rms(samples)
+	if !hasSpeech(samples, silenceWindow, silenceThreshold) {
+		fmt.Printf("[audio-capture] dropped chunk: %d samples, rms=%.0f (no speech window above %.0f)\n", len(samples), chunkRMS, silenceThreshold)
+		return false
+	}
+	fmt.Printf("[audio-capture] sending chunk: %d samples, rms=%.0f\n", len(samples), chunkRMS)
+	wavData := EncodeWAV(samples, asrSampleRate)
+	text, err := Transcribe(wavData, whisperURL)
+	if err != nil {
+		renderer.SetStatus("asr error: " + err.Error())
+		return false
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	id := ac.AddEntry(trimmed)
+	ac.AppendTranscript(trimmed)
+	renderer.AppendTranscriptChunk("mic", trimmed, id)
+	renderer.SetStatus(fmt.Sprintf("%s — %d chars accumulated", statusPrefix, ac.TranscriptLen()))
+	return true
+}
+
 func handleMicStop(recorder *Recorder, renderer Renderer, ac *AudioCapture, whisperURL string, micStopCh *chan struct{}) {
 	close(*micStopCh)
 	*micStopCh = nil
 
-	// Final drain of remaining samples
-	samples := recorder.Stop()
-	if len(samples) == 0 {
-		renderer.SetStatus("mic stopped")
-		return
-	}
-
-	if rms(samples) < silenceThreshold {
-		renderer.SetStatus("mic stopped")
-		return
-	}
-
 	renderer.SetStatus("transcribing final mic chunk...")
-	wavData := EncodeWAV(samples, asrSampleRate)
-	transcript, err := Transcribe(wavData, whisperURL)
-	if err != nil {
-		renderer.SetStatus("asr error: " + err.Error())
-		return
-	}
-
-	trimmed := strings.TrimSpace(transcript)
-	if trimmed == "" {
+	samples := recorder.Stop()
+	if !transcribeAndAppend(samples, renderer, ac, whisperURL, "mic stopped") {
 		renderer.SetStatus("mic stopped")
-		return
 	}
-
-	id := ac.AddEntry(trimmed)
-	ac.AppendTranscript(trimmed)
-	renderer.AppendTranscriptChunk("mic", trimmed, id)
-	renderer.SetStatus(fmt.Sprintf("mic stopped — %d chars accumulated", ac.TranscriptLen()))
 }
 
 func micTranscribeChunk(recorder *Recorder, renderer Renderer, ac *AudioCapture, whisperURL string) {
-	samples := recorder.DrainSamples()
-	if len(samples) == 0 {
-		return
-	}
-	if rms(samples) < silenceThreshold {
-		return
-	}
-
-	wavData := EncodeWAV(samples, asrSampleRate)
-	text, err := Transcribe(wavData, whisperURL)
-	if err != nil {
-		fmt.Printf("[mic] transcribe error: %v\n", err)
-		return
-	}
-
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" {
-		return
-	}
-
-	id := ac.AddEntry(trimmed)
-	ac.AppendTranscript(trimmed)
-	renderer.AppendTranscriptChunk("mic", trimmed, id)
-	renderer.SetStatus(fmt.Sprintf("mic — %d chars accumulated", ac.TranscriptLen()))
+	transcribeAndAppend(recorder.DrainSamples(), renderer, ac, whisperURL, "mic")
 }
 
 func handleExplain(provider Provider, renderer Renderer) {
@@ -885,7 +845,7 @@ func handleExplain(provider Provider, renderer Renderer) {
 func handleImplement(provider Provider, renderer Renderer, lang string) {
 	fence := fenceLang(lang)
 	prompt := "Based on our conversation so far, please implement the complete, working solution in " + lang + ". " +
-		"Use markdown fenced code blocks (```" + fence + ") for all code. Keep explanations minimal."
+		"Use markdown fenced code blocks (```" + fence + ") for all code. Keep explanations minimal.\n\n" + codeRules
 
 	renderer.SetStatus("implementing...")
 	renderer.AppendStreamStart()
@@ -963,20 +923,20 @@ func selectContextDir(scanner *bufio.Scanner) string {
 	return path
 }
 
-func whisperModelPath(choice string) string {
+func whisperModel(choice string) struct{ label, file, url string } {
 	m := whisperModels[choice]
 	if m.file == "" {
 		m = whisperModels["1"]
 	}
-	return os.ExpandEnv("$HOME/.local/share/whisper/" + m.file)
+	return m
+}
+
+func whisperModelPath(choice string) string {
+	return os.ExpandEnv("$HOME/.local/share/whisper/" + whisperModel(choice).file)
 }
 
 func whisperModelURL(choice string) string {
-	m := whisperModels[choice]
-	if m.url == "" {
-		m = whisperModels["1"]
-	}
-	return m.url
+	return whisperModel(choice).url
 }
 
 func ensureWhisperModel(path, url string) {
@@ -1126,5 +1086,6 @@ func handleCaptureStore(monitorIdx int, renderer Renderer, appState *AppState) {
 		return
 	}
 	appState.SetScreenshot(imgData)
+	renderer.SetScreenLoaded(true)
 	renderer.SetStatus("screen captured — ready to process")
 }

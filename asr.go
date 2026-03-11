@@ -46,6 +46,7 @@ func (r *Recorder) Start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	r.killStreams()
 	r.samples = r.samples[:0]
 	r.stopCh = make(chan struct{})
 
@@ -123,6 +124,9 @@ func (r *Recorder) readLoopParec(stdout io.ReadCloser) {
 		default:
 		}
 		n, err := stdout.Read(buf)
+		if err != nil && err != io.EOF {
+			AppLog.Error("parec read: %v", err)
+		}
 		if err != nil {
 			return
 		}
@@ -180,6 +184,20 @@ func (r *Recorder) DrainSamples() []int16 {
 		r.samples = r.samples[len(r.samples)-overlapSamples:]
 	}
 	return out
+}
+
+// killStreams sends SIGKILL without waiting — safe to call under r.mu.
+func (r *Recorder) killStreams() {
+	if r.stopCh != nil {
+		close(r.stopCh)
+		r.stopCh = nil
+	}
+	if r.micCmd != nil && r.micCmd.Process != nil {
+		r.micCmd.Process.Kill()
+	}
+	if r.monCmd != nil && r.monCmd.Process != nil {
+		r.monCmd.Process.Kill()
+	}
 }
 
 func (r *Recorder) closeStreams() {

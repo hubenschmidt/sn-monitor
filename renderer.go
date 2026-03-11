@@ -22,6 +22,7 @@ type Renderer interface {
 	SetAudioRecording(recording bool)
 	SetSoundCheck(active bool)
 	UpdateVU(micLevel, audioLevel float64)
+	SetScreenLoaded(loaded bool)
 	Clear()
 	Close()
 }
@@ -120,6 +121,8 @@ func (t *TerminalRenderer) SetSoundCheck(active bool) {}
 
 func (t *TerminalRenderer) UpdateVU(micLevel, audioLevel float64) {}
 
+func (t *TerminalRenderer) SetScreenLoaded(loaded bool) {}
+
 func (t *TerminalRenderer) Clear() {
 	t.history.Reset()
 	t.repaint()
@@ -213,6 +216,12 @@ func (m *MultiRenderer) SetSoundCheck(active bool) {
 func (m *MultiRenderer) UpdateVU(micLevel, audioLevel float64) {
 	for _, r := range m.renderers {
 		r.UpdateVU(micLevel, audioLevel)
+	}
+}
+
+func (m *MultiRenderer) SetScreenLoaded(loaded bool) {
+	for _, r := range m.renderers {
+		r.SetScreenLoaded(loaded)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/packages/ssestream"
 )
 
 type AnthropicProvider struct {
@@ -29,12 +30,33 @@ func (p *AnthropicProvider) SetContextDir(dir string) {
 	p.contextDir = dir
 }
 
+func (p *AnthropicProvider) ContextDir() string {
+	return p.contextDir
+}
+
 func (p *AnthropicProvider) ClearHistory() {
 	p.history = nil
 }
 
 func (p *AnthropicProvider) ModelName() string {
 	return string(p.model)
+}
+
+func streamText(stream *ssestream.Stream[anthropic.MessageStreamEventUnion], onDelta func(string)) (string, error) {
+	var buf strings.Builder
+	for stream.Next() {
+		evt := stream.Current()
+		if evt.Type == "content_block_delta" && evt.Delta.Type == "text_delta" {
+			buf.WriteString(evt.Delta.Text)
+			if onDelta != nil {
+				onDelta(evt.Delta.Text)
+			}
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return "", fmt.Errorf("api call failed: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func (p *AnthropicProvider) Solve(pngData []byte, transcript string, onDelta func(string)) (string, error) {
@@ -51,27 +73,12 @@ func (p *AnthropicProvider) Solve(pngData []byte, transcript string, onDelta fun
 		Messages:  p.history,
 	})
 
-	var buf strings.Builder
-	for stream.Next() {
-		evt := stream.Current()
-		if evt.Type != "content_block_delta" {
-			continue
-		}
-		if evt.Delta.Type != "text_delta" {
-			continue
-		}
-		buf.WriteString(evt.Delta.Text)
-		onDelta(evt.Delta.Text)
-	}
-
-	if err := stream.Err(); err != nil {
+	text, err := streamText(stream, onDelta)
+	if err != nil || text == "" {
 		p.history = p.history[:len(p.history)-1]
-		return "", fmt.Errorf("api call failed: %w", err)
-	}
-
-	text := buf.String()
-	if text == "" {
-		p.history = p.history[:len(p.history)-1]
+		if err != nil {
+			return "", err
+		}
 		return "", fmt.Errorf("no text in response")
 	}
 
@@ -89,23 +96,11 @@ func (p *AnthropicProvider) Summarize(text string) (string, error) {
 			anthropic.NewUserMessage(anthropic.NewTextBlock(text)),
 		},
 	})
-
-	var buf strings.Builder
-	for stream.Next() {
-		evt := stream.Current()
-		if evt.Type != "content_block_delta" {
-			continue
-		}
-		if evt.Delta.Type != "text_delta" {
-			continue
-		}
-		buf.WriteString(evt.Delta.Text)
-	}
-
-	if err := stream.Err(); err != nil {
+	result, err := streamText(stream, nil)
+	if err != nil {
 		return "", fmt.Errorf("summarize failed: %w", err)
 	}
-	return buf.String(), nil
+	return result, nil
 }
 
 func (p *AnthropicProvider) FollowUp(text string, onDelta func(string)) (string, error) {
@@ -120,27 +115,12 @@ func (p *AnthropicProvider) FollowUp(text string, onDelta func(string)) (string,
 		Messages:  p.history,
 	})
 
-	var buf strings.Builder
-	for stream.Next() {
-		evt := stream.Current()
-		if evt.Type != "content_block_delta" {
-			continue
-		}
-		if evt.Delta.Type != "text_delta" {
-			continue
-		}
-		buf.WriteString(evt.Delta.Text)
-		onDelta(evt.Delta.Text)
-	}
-
-	if err := stream.Err(); err != nil {
+	reply, err := streamText(stream, onDelta)
+	if err != nil || reply == "" {
 		p.history = p.history[:len(p.history)-1]
-		return "", fmt.Errorf("api call failed: %w", err)
-	}
-
-	reply := buf.String()
-	if reply == "" {
-		p.history = p.history[:len(p.history)-1]
+		if err != nil {
+			return "", err
+		}
 		return "", fmt.Errorf("no text in response")
 	}
 

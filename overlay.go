@@ -32,6 +32,10 @@ static void show_window(void *gtkWindow) {
 	gtk_widget_show_all(GTK_WIDGET(gtkWindow));
 }
 
+static void set_keep_above(void *gtkWindow, int above) {
+	gtk_window_set_keep_above(GTK_WINDOW(gtkWindow), above);
+}
+
 static void set_no_focus(void *gtkWindow) {
 	gtk_window_set_accept_focus(GTK_WINDOW(gtkWindow), FALSE);
 	gtk_window_set_focus_on_map(GTK_WINDOW(gtkWindow), FALSE);
@@ -134,7 +138,8 @@ type OverlayRenderer struct {
 	provider      Provider
 	vuJS   atomic.Pointer[string]
 	fsGeom atomic.Pointer[[4]int]
-	isFS   atomic.Bool
+	isFS       atomic.Bool
+	needsRaise atomic.Bool
 
 	sandboxMu   sync.Mutex
 	sandboxCode string
@@ -231,7 +236,9 @@ func NewOverlayRenderer() *OverlayRenderer {
 	})
 
 	w.Bind("_selectContext", func(mode string) {
+		C.set_keep_above(o.gtkWin, 0)
 		go func() {
+			defer o.needsRaise.Store(true)
 			path := pickPath(mode)
 			if path == "" {
 				return
@@ -239,8 +246,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 			if o.provider != nil {
 				o.provider.SetContextDir(path)
 			}
-			label := filepath.Base(path)
-			o.eval(`document.getElementById('btn-context').textContent=` + jsString("ctx: "+label) + `;`)
+			o.SetFileSysLabel(path)
 		}()
 	})
 
@@ -250,6 +256,9 @@ func NewOverlayRenderer() *OverlayRenderer {
 	// all cross-thread Dispatch calls that were causing SIGSEGV.
 	w.Bind("_pollUpdates", func() string {
 		C.fix_signal_handlers()
+		if o.needsRaise.CompareAndSwap(true, false) {
+			C.set_keep_above(o.gtkWin, 1)
+		}
 		o.pendingMu.Lock()
 		js := o.pendingJS.String()
 		o.pendingJS.Reset()
@@ -392,6 +401,12 @@ func (o *OverlayRenderer) SetToggleChunkHandler(fn func(int, bool)) {
 
 func (o *OverlayRenderer) SetProvider(p Provider) { o.provider = p }
 
+func (o *OverlayRenderer) SetFileSysLabel(path string) {
+	label := filepath.Base(path)
+	o.eval(`document.getElementById('btn-context').textContent=` + jsString("file sys: "+label) + `;` +
+		`window._ctxFS=` + jsString(label) + `;_updateCtxDisplay();`)
+}
+
 func (o *OverlayRenderer) MoveToMonitor(x, y int) {
 	C.move_window(o.gtkWin, C.int(x), C.int(y))
 }
@@ -458,19 +473,25 @@ func (o *OverlayRenderer) StreamStart() {
 	o.eval(js)
 }
 
-func (o *OverlayRenderer) StreamDelta(delta string) {
+func (o *OverlayRenderer) streamDelta(delta string) {
 	o.streamBuf.WriteString(delta)
 	js := "var s=document.getElementById('stream');if(s){s.textContent+=" + jsString(delta) + ";if(window._autoScroll)s.scrollIntoView(false);}"
 	o.eval(js)
 }
 
-func (o *OverlayRenderer) StreamDone() {
+func (o *OverlayRenderer) StreamDelta(delta string) { o.streamDelta(delta) }
+
+func (o *OverlayRenderer) wrapResponse() string {
 	html, err := o.markdownToHTML(o.streamBuf.String())
 	if err != nil {
 		html = "<pre>" + escapeHTML(o.streamBuf.String()) + "</pre>"
 	}
-	wrapped := `<div class="response-block">` + html +
+	return `<div class="response-block">` + html +
 		`<button class="explain-btn" onclick="_action('explain')" title="Explain further">?</button></div>`
+}
+
+func (o *OverlayRenderer) StreamDone() {
+	wrapped := o.wrapResponse()
 	js := "var c=document.getElementById('chat-content'),st=c.scrollTop;" +
 		"c.innerHTML=" + jsString(wrapped) + ";_injectSandboxButtons();" +
 		"if(!window._autoScroll)c.scrollTop=st;"
@@ -486,19 +507,10 @@ func (o *OverlayRenderer) AppendStreamStart() {
 	o.eval(js)
 }
 
-func (o *OverlayRenderer) AppendStreamDelta(delta string) {
-	o.streamBuf.WriteString(delta)
-	js := "var s=document.getElementById('stream');if(s){s.textContent+=" + jsString(delta) + ";if(window._autoScroll)s.scrollIntoView(false);}"
-	o.eval(js)
-}
+func (o *OverlayRenderer) AppendStreamDelta(delta string) { o.streamDelta(delta) }
 
 func (o *OverlayRenderer) AppendStreamDone() {
-	html, err := o.markdownToHTML(o.streamBuf.String())
-	if err != nil {
-		html = "<pre>" + escapeHTML(o.streamBuf.String()) + "</pre>"
-	}
-	wrapped := `<div class="response-block">` + html +
-		`<button class="explain-btn" onclick="_action('explain')" title="Explain further">?</button></div>`
+	wrapped := o.wrapResponse()
 	js := `var s=document.getElementById('stream');` +
 		`if(s){var c=document.getElementById('chat-content'),st=c.scrollTop;` +
 		`var d=document.createElement('div');d.innerHTML=` + jsString(wrapped) + `;s.replaceWith(d);` +
@@ -514,9 +526,14 @@ func (o *OverlayRenderer) AppendTranscriptChunk(source, text string, id int) {
 			`<input type="checkbox" class="chunk-cb" onchange="_toggleChunk(%d,this.checked)">`+
 			`<span class="ts">[%s</span> <span class="src %s">%s</span><span class="ts">]</span> %s</div>`,
 		id, id, escapeHTML(ts), srcClass, escapeHTML(source), escapeHTML(text))
+	counterKey := "_ctxAudio"
+	if source == "mic" {
+		counterKey = "_ctxMic"
+	}
 	js := `var t=document.getElementById('transcript-content');` +
 		`t.innerHTML+=` + jsString(chunk) + `;` +
-		`if(window._transcriptAutoScroll){t.scrollTop=t.scrollHeight;}`
+		`if(window._transcriptAutoScroll){t.scrollTop=t.scrollHeight;}` +
+		`window.` + counterKey + `=(window.` + counterKey + `||0)+` + fmt.Sprintf("%d", len(text)) + `;_updateCtxDisplay();`
 	o.eval(js)
 }
 
@@ -525,42 +542,32 @@ func (o *OverlayRenderer) ClearTranscriptCheckboxes() {
 	o.eval(js)
 }
 
-func (o *OverlayRenderer) SetAudioRecording(recording bool) {
-	audioLabel := keyLabels[HotkeyAudioCapture]
-	label := audioLabel
+func (o *OverlayRenderer) setRecordingButton(elemID, label string, recording bool) {
 	bg, color := "''", "''"
 	if recording {
-		label = `<span class="rec-dot"></span>` + escapeHTML(audioLabel)
+		label = `<span class="rec-dot"></span>` + label
 		bg, color = "'rgba(220,50,50,0.7)'", "'#fff'"
 	}
-	js := fmt.Sprintf(`var b=document.getElementById('btn-audio');if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`, bg, color, jsString(label))
+	js := fmt.Sprintf(`var b=document.getElementById(%s);if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`,
+		jsString(elemID), bg, color, jsString(label))
 	o.eval(js)
+}
+
+func (o *OverlayRenderer) SetAudioRecording(recording bool) {
+	o.setRecordingButton("btn-audio", escapeHTML(keyLabels[HotkeyAudioCapture]), recording)
 }
 
 func (o *OverlayRenderer) SetSoundCheck(active bool) {
-	label := "Setup"
-	bg, color := "''", "''"
+	o.setRecordingButton("btn-setup", "Setup", active)
 	vuDisplay := "'none'"
 	if active {
-		label = `<span class="rec-dot"></span>Setup`
-		bg, color = "'rgba(220,50,50,0.7)'", "'#fff'"
 		vuDisplay = "'flex'"
 	}
-	js := fmt.Sprintf(`var b=document.getElementById('btn-setup');if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`+
-		`document.getElementById('vu-meters').style.display=%s;`, bg, color, jsString(label), vuDisplay)
-	o.eval(js)
+	o.eval(fmt.Sprintf(`document.getElementById('vu-meters').style.display=%s;`, vuDisplay))
 }
 
 func (o *OverlayRenderer) SetMicRecording(recording bool) {
-	micLabel := keyLabels[HotkeyFollowUp]
-	label := escapeHTML(micLabel)
-	bg, color := "''", "''"
-	if recording {
-		label = `<span class="rec-dot"></span>` + escapeHTML(micLabel)
-		bg, color = "'rgba(220,50,50,0.7)'", "'#fff'"
-	}
-	js := fmt.Sprintf(`var b=document.getElementById('btn-voice');if(b){b.style.background=%s;b.style.color=%s;b.innerHTML=%s;}`, bg, color, jsString(label))
-	o.eval(js)
+	o.setRecordingButton("btn-voice", escapeHTML(keyLabels[HotkeyFollowUp]), recording)
 }
 
 func (o *OverlayRenderer) UpdateVU(micLevel, audioLevel float64) {
@@ -574,10 +581,19 @@ func (o *OverlayRenderer) UpdateVU(micLevel, audioLevel float64) {
 	o.vuJS.Store(&js)
 }
 
+func (o *OverlayRenderer) SetScreenLoaded(loaded bool) {
+	val := "false"
+	if loaded {
+		val = "true"
+	}
+	o.eval("window._ctxScreen=" + val + ";_updateCtxDisplay();")
+}
+
 func (o *OverlayRenderer) Clear() {
 	js := "document.getElementById('chat-content').innerHTML='';" +
 		"document.getElementById('transcript-content').innerHTML='';" +
-		"document.getElementById('footer-status').textContent='Cleared.';"
+		"document.getElementById('footer-status').textContent='Cleared.';" +
+		"window._ctxScreen=false;window._ctxAudio=0;window._ctxMic=0;_updateCtxDisplay();"
 	o.eval(js)
 }
 
@@ -712,6 +728,8 @@ body {
   color: #888; font-size: 11px; padding: 4px 12px;
   text-align: center;
 }
+#context-info { color: #7ec8e3; font-size: 11px; padding: 2px 0; }
+#context-info:empty { display: none; }
 #footer-status { color: #e8a735; font-size: 11px; margin-bottom: 2px; }
 #footer-btns { display:flex; gap:6px; justify-content:center; flex-wrap:wrap; }
 #footer-btns button {
@@ -780,7 +798,7 @@ body {
   <pre id="sandbox-output"></pre>
 </div>
 <div id="log-content" class="tab-content"><pre id="log-output"></pre></div>
-<div id="footer"><div id="footer-status"></div>
+<div id="footer"><div id="context-info"></div><div id="footer-status"></div>
 <div id="vu-meters">
   <span class="vu-label">mic</span>
   <div class="vu-track"><div id="vu-mic" class="vu-fill"></div></div>
@@ -788,31 +806,41 @@ body {
   <div class="vu-track"><div id="vu-audio" class="vu-fill"></div></div>
 </div>
 <div id="footer-btns">
-` + buildFooterButtons() + `<button id="btn-context" onclick="_showCtxMenu(event)">ctx</button><button id="btn-setup" onclick="_showSetupMenu(event)">Setup</button>
+` + buildFooterButtons() + `<button id="btn-setup" onclick="_showSetupMenu(event)">Setup</button>
 </div></div>
 <script>
+window._ctxScreen=false;window._ctxAudio=0;window._ctxMic=0;window._ctxFS='';
+window._updateCtxDisplay=function(){
+  var parts=[];
+  if(_ctxScreen)parts.push('screen: \u2713');
+  if(_ctxAudio)parts.push('audio: '+_ctxAudio+' chars');
+  if(_ctxMic)parts.push('mic: '+_ctxMic+' chars');
+  if(_ctxFS)parts.push('file sys: '+_ctxFS);
+  document.getElementById('context-info').textContent=parts.join(' | ');
+};
 window._ctxMenu=null;
-window._showCtxMenu=function(e){
-  e.stopPropagation();
-  if(_ctxMenu){_ctxMenu.remove();_ctxMenu=null;return;}
+window._setupMenu=null;
+window._showPopup=function(refName,closeFn){
   var m=document.createElement('div');
   m.className='ctx-popup';
-  m.innerHTML='<div onclick="_selectContext(\'dir\')">Directory</div><div onclick="_selectContext(\'file\')">File</div>';
   document.getElementById('footer-btns').appendChild(m);
-  _ctxMenu=m;
-  setTimeout(function(){document.addEventListener('click',function h(){if(_ctxMenu){_ctxMenu.remove();_ctxMenu=null;}document.removeEventListener('click',h);});},0);
+  window[refName]=m;
+  setTimeout(function(){document.addEventListener('click',function h(){closeFn();document.removeEventListener('click',h);});},0);
+  return m;
 };
-window._setupMenu=null;
+window._closeCtx=function(){if(_ctxMenu){_ctxMenu.remove();_ctxMenu=null;}};
 window._closeSetup=function(){if(_setupMenu){_setupMenu.remove();_setupMenu=null;}};
+window._showCtxMenu=function(e){
+  e.stopPropagation();
+  if(_ctxMenu){_closeCtx();return;}
+  var m=_showPopup('_ctxMenu',_closeCtx);
+  m.innerHTML='<div onclick="_selectContext(\'dir\')">Directory</div><div onclick="_selectContext(\'file\')">File</div>';
+};
 window._showSetupMenu=function(e){
   e.stopPropagation();
   if(_setupMenu){_closeSetup();return;}
-  var m=document.createElement('div');
-  m.className='ctx-popup';
+  var m=_showPopup('_setupMenu',_closeSetup);
   m.innerHTML='<div id="btn-soundcheck" onclick="_action(\'soundcheck\')">Sound Check</div><div onclick="_showMPXSub()">Mouse (MPX)</div>';
-  document.getElementById('footer-btns').appendChild(m);
-  _setupMenu=m;
-  setTimeout(function(){document.addEventListener('click',function h(){_closeSetup();document.removeEventListener('click',h);});},0);
 };
 window._showMPXSub=function(){
   _closeSetup();
@@ -821,17 +849,13 @@ window._showMPXSub=function(){
     _listMice().then(function(raw){
       var mice=JSON.parse(raw);
       if(!mice||!mice.length)return;
-      var m=document.createElement('div');
-      m.className='ctx-popup';
+      var m=_showPopup('_setupMenu',_closeSetup);
       for(var i=0;i<mice.length;i++){(function(mouse){
         var d=document.createElement('div');
         d.textContent=mouse.Name+' ('+mouse.ID+')';
         d.onclick=function(){_setupMPX(mouse.ID);_closeSetup();};
         m.appendChild(d);
       })(mice[i]);}
-      document.getElementById('footer-btns').appendChild(m);
-      _setupMenu=m;
-      setTimeout(function(){document.addEventListener('click',function h(){_closeSetup();document.removeEventListener('click',h);});},0);
     });
   });
 };
@@ -848,12 +872,13 @@ window._debouncedSync=function(taId,hlId){
   clearTimeout(window._hlTimers[taId]);
   window._hlTimers[taId]=setTimeout(function(){_syncHighlight(taId,hlId);},150);
 };
-var edTA=document.getElementById('sandbox-editor');
-var tsTA=document.getElementById('sandbox-tests');
-edTA.addEventListener('input',function(){_autoSize(this);_debouncedSync('sandbox-editor','sandbox-editor-hl');});
-tsTA.addEventListener('input',function(){_autoSize(this);_debouncedSync('sandbox-tests','sandbox-tests-hl');});
-edTA.addEventListener('scroll',function(){var p=this.parentNode.querySelector('.editor-highlight');p.scrollTop=this.scrollTop;p.scrollLeft=this.scrollLeft;});
-tsTA.addEventListener('scroll',function(){var p=this.parentNode.querySelector('.editor-highlight');p.scrollTop=this.scrollTop;p.scrollLeft=this.scrollLeft;});
+window._bindEditor=function(taId,hlId){
+  var ta=document.getElementById(taId);
+  ta.addEventListener('input',function(){_autoSize(this);_debouncedSync(taId,hlId);});
+  ta.addEventListener('scroll',function(){var p=this.parentNode.querySelector('.editor-highlight');p.scrollTop=this.scrollTop;p.scrollLeft=this.scrollLeft;});
+};
+_bindEditor('sandbox-editor','sandbox-editor-hl');
+_bindEditor('sandbox-tests','sandbox-tests-hl');
 window._runCombined=function(){
   var code=document.getElementById('sandbox-editor').value;
   var tests=document.getElementById('sandbox-tests').value;
@@ -861,21 +886,16 @@ window._runCombined=function(){
   _runSandbox(code,tests,lang);
 };
 window._autoScroll=true;
-(function(){
-  var cc=document.getElementById('chat-content');
-  cc.addEventListener('wheel',function(){window._autoScroll=false;});
-  cc.addEventListener('scroll',function(){
-    if(cc.scrollTop+cc.clientHeight>=cc.scrollHeight-5)window._autoScroll=true;
-  });
-})();
 window._transcriptAutoScroll=true;
-(function(){
-  var tc=document.getElementById('transcript-content');
-  tc.addEventListener('wheel',function(){window._transcriptAutoScroll=false;});
-  tc.addEventListener('scroll',function(){
-    if(tc.scrollTop+tc.clientHeight>=tc.scrollHeight-5)window._transcriptAutoScroll=true;
+window._setupAutoScroll=function(id,flag){
+  var el=document.getElementById(id);
+  el.addEventListener('wheel',function(){window[flag]=false;});
+  el.addEventListener('scroll',function(){
+    if(el.scrollTop+el.clientHeight>=el.scrollHeight-5)window[flag]=true;
   });
-})();
+};
+_setupAutoScroll('chat-content','_autoScroll');
+_setupAutoScroll('transcript-content','_transcriptAutoScroll');
 window._logBadge=0;
 window._logIdx=-1;
 window._sandboxLangs={'python':1,'go':1,'javascript':1,'js':1,'typescript':1,'ts':1,'cpp':1,'c++':1,'rust':1,'java':1};
@@ -1009,6 +1029,9 @@ func buildFooterButtons() string {
 			idAttr = ` id="` + id + `"`
 		}
 		buf.WriteString(fmt.Sprintf(`<button%s onclick="_action('%s')">%s</button>`+"\n", idAttr, name, escapeHTML(label)))
+		if a == HotkeyFollowUp {
+			buf.WriteString(`<button id="btn-context" onclick="_showCtxMenu(event)">file sys</button>` + "\n")
+		}
 	}
 	return buf.String()
 }
