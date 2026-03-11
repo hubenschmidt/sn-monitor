@@ -41,8 +41,7 @@ static void move_window(void *gtkWindow, int x, int y) {
 	gtk_window_move(GTK_WINDOW(gtkWindow), x, y);
 }
 
-static void fullscreen_to_rect(void *gtkWindow, int x, int y, int w, int h) {
-	gtk_window_set_decorated(GTK_WINDOW(gtkWindow), FALSE);
+static void resize_and_move(void *gtkWindow, int x, int y, int w, int h) {
 	gtk_window_move(GTK_WINDOW(gtkWindow), x, y);
 	gtk_window_resize(GTK_WINDOW(gtkWindow), w, h);
 }
@@ -135,6 +134,7 @@ type OverlayRenderer struct {
 	provider      Provider
 	vuJS   atomic.Pointer[string]
 	fsGeom atomic.Pointer[[4]int]
+	isFS   atomic.Bool
 
 	sandboxMu   sync.Mutex
 	sandboxCode string
@@ -185,6 +185,22 @@ func NewOverlayRenderer() *OverlayRenderer {
 			return
 		}
 		o.onToggleChunk(id, checked)
+	})
+
+	w.Bind("_toggleFS", func() {
+		g := o.fsGeom.Load()
+		if g == nil {
+			return
+		}
+		if o.isFS.Load() {
+			C.resize_and_move(o.gtkWin, C.int(g[0]), C.int(g[1]), 700, 900)
+			o.isFS.Store(false)
+			o.eval(`document.getElementById('fs-btn').textContent='\u26F6';`)
+			return
+		}
+		C.resize_and_move(o.gtkWin, C.int(g[0]), C.int(g[1]), C.int(g[2]), C.int(g[3]))
+		o.isFS.Store(true)
+		o.eval(`document.getElementById('fs-btn').textContent='\u2750';`)
 	})
 
 	w.Bind("_listMice", func() string {
@@ -361,7 +377,7 @@ func NewOverlayRenderer() *OverlayRenderer {
 		return buf.String()
 	})
 
-	w.SetHtml(o.buildShell("Ready."))
+	w.SetHtml(o.buildShell())
 	C.show_window(gtkWin)
 	return o
 }
@@ -407,7 +423,9 @@ func (o *OverlayRenderer) Run() {
 		}
 		g := o.fsGeom.Load()
 		if g != nil {
-			C.fullscreen_to_rect(o.gtkWin, C.int(g[0]), C.int(g[1]), C.int(g[2]), C.int(g[3]))
+			C.resize_and_move(o.gtkWin, C.int(g[0]), C.int(g[1]), C.int(g[2]), C.int(g[3]))
+			o.isFS.Store(true)
+			o.eval(`document.getElementById('fs-btn').textContent='\u2750';`)
 		}
 	})
 	o.w.Run()
@@ -599,7 +617,7 @@ func (o *OverlayRenderer) markdownToHTML(md string) (string, error) {
 	return buf.String(), err
 }
 
-func (o *OverlayRenderer) buildShell(statusText string) string {
+func (o *OverlayRenderer) buildShell() string {
 	return `<!DOCTYPE html><html><head><style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -611,18 +629,9 @@ body {
   padding: 0;
   overflow-y: auto;
 }
-#drag-handle {
-  cursor: grab; height: 28px; background: rgba(40,40,40,0.97);
-  text-align: center; font-size: 12px; color: #aaa;
-  line-height: 28px; user-select: none;
-  border-bottom: 1px solid rgba(255,255,255,0.2);
-  position: sticky; top: 0; z-index: 10;
-}
-#drag-handle:active { cursor: grabbing; }
-#status { color: #888; font-size: 12px; padding: 8px 12px 0; background: rgba(40,40,40,0.97); position: sticky; top: 28px; z-index: 10; }
 #tab-bar {
   display: flex; gap: 0; border-bottom: 1px solid rgba(255,255,255,0.2);
-  background: rgba(40,40,40,0.97); position: sticky; top: 48px; z-index: 10;
+  background: rgba(40,40,40,0.97); position: sticky; top: 0; z-index: 10;
 }
 #tab-bar button {
   flex: 1; background: rgba(255,255,255,0.05); border: none;
@@ -745,8 +754,6 @@ body {
 .log-error { color:#e05050; } .log-warn { color:#e8a735; } .log-info { color:#888; }
 ` + o.chromaCS + `
 </style></head><body>
-<div id="drag-handle">&#x2630; sn-monitor</div>
-<div id="status">` + escapeHTML(statusText) + `</div>
 <div id="tab-bar">
   <button id="tab-chat" class="active" onclick="switchTab('chat')">Chat</button>
   <button id="tab-transcript" onclick="switchTab('transcript')">Transcript</button>
@@ -784,16 +791,6 @@ body {
 ` + buildFooterButtons() + `<button id="btn-context" onclick="_showCtxMenu(event)">ctx</button><button id="btn-setup" onclick="_showSetupMenu(event)">Setup</button>
 </div></div>
 <script>
-(function(){
-  var h=document.getElementById('drag-handle'),d=false,sx,sy;
-  h.onmousedown=function(e){d=true;sx=e.screenX;sy=e.screenY};
-  document.onmousemove=function(e){
-    if(!d)return;
-    window.moveBy(e.screenX-sx,e.screenY-sy);
-    sx=e.screenX;sy=e.screenY;
-  };
-  document.onmouseup=function(){d=false};
-})();
 window._ctxMenu=null;
 window._showCtxMenu=function(e){
   e.stopPropagation();
