@@ -56,9 +56,18 @@ func (p *OpenAIProvider) RemoveHistoryPair(userIndex int) {
 	p.history = append(p.history[:userIndex], p.history[userIndex+2:]...)
 }
 
+func firstOutputMessageID(output []responses.ResponseOutputItemUnion) string {
+	for _, item := range output {
+		if item.Type == "message" {
+			return item.ID
+		}
+	}
+	return ""
+}
+
 func streamResponses(stream *ssestream.Stream[responses.ResponseStreamEventUnion], onDelta func(string)) (string, string, error) {
 	var buf strings.Builder
-	var responseID string
+	var messageID string
 	for stream.Next() {
 		evt := stream.Current()
 		if evt.Type == "response.output_text.delta" {
@@ -68,13 +77,13 @@ func streamResponses(stream *ssestream.Stream[responses.ResponseStreamEventUnion
 			}
 		}
 		if evt.Type == "response.completed" {
-			responseID = evt.Response.ID
+			messageID = firstOutputMessageID(evt.Response.Output)
 		}
 	}
 	if err := stream.Err(); err != nil {
 		return "", "", fmt.Errorf("api call failed: %w", err)
 	}
-	return buf.String(), responseID, nil
+	return buf.String(), messageID, nil
 }
 
 func (p *OpenAIProvider) buildUserItem(contentList responses.ResponseInputMessageContentListParam) responses.ResponseInputItemUnionParam {

@@ -1,16 +1,4 @@
-window._ctxScreenCount = 0;
-window._ctxAudio = 0;
-window._ctxMic = 0;
-window._ctxFS = "";
 window._clearOnProcess = false;
-window._updateCtxDisplay = function () {
-  var parts = [];
-  if (_ctxScreenCount) parts.push("screens: " + _ctxScreenCount);
-  if (_ctxAudio) parts.push("audio: " + _ctxAudio + " chars");
-  if (_ctxMic) parts.push("mic: " + _ctxMic + " chars");
-  if (_ctxFS) parts.push("file sys: " + _ctxFS);
-  document.getElementById("context-info").textContent = parts.join(" | ");
-};
 window._ctxMenu = null;
 window._setupMenu = null;
 window._showPopup = function (refName, closeFn, anchor) {
@@ -150,8 +138,14 @@ window._updateCtxReceipt = function () {
   var r = selS + "/" + totS + " screenshots, " + totT + " transcript chunks";
   if (selT) r += " (" + selT + " selected)";
   r += ", " + inclF + "/" + totF + " source files";
-  window._ctxScreenCount = selS;
-  _updateCtxDisplay();
+};
+window._selectAllTranscript = function () {
+  document.querySelectorAll(".chunk-cb").forEach(function (cb) {
+    if (cb.checked) return;
+    cb.checked = true;
+    cb.dispatchEvent(new Event("change"));
+  });
+  _refreshContext();
 };
 window._refreshContext = function () {
   _getContextState().then(function (raw) {
@@ -176,14 +170,22 @@ window._refreshContext = function () {
     }
     document.getElementById("ctx-screenshots").innerHTML = sh;
     var th = '<div class="ctx-section-title">Transcript</div>';
-    var selChunks = document.querySelectorAll(".chunk-cb:checked");
-    var totalChunks = document.querySelectorAll(".chunk-cb");
-    if (!totalChunks.length) {
+    var selT = st.transcript.filter(function (t) { return t.selected; });
+    if (!st.transcript.length) {
       th += '<div class="row row-center" style="color:#666">none</div>';
-    } else if (!selChunks.length) {
-      th += '<div class="row row-center" style="color:#ccc">All (' + totalChunks.length + ' chunks)</div>';
+    } else if (!selT.length) {
+      th += '<div class="row row-center" style="color:#666">' + st.transcript.length + ' chunks (none selected)</div>';
     } else {
-      th += '<div class="row row-center" style="color:#ccc">' + selChunks.length + ' selected</div>';
+      for (var i = 0; i < selT.length; i++) {
+        var t = selT[i];
+        var preview = t.text.length > 60 ? t.text.substring(0, 60) + "\u2026" : t.text;
+        th +=
+          '<div class="row row-center ctx-item">' +
+          '<span class="row-fill" style="color:#ccc">[' + t.time + " " + t.source + "] " + preview + "</span>" +
+          '<button class="row-end ctx-rm" onclick="_toggleChunk(' + t.id +
+          ',false);var r=document.querySelector(\'.transcript-chunk[data-id=&quot;' + t.id +
+          '&quot;] .chunk-cb\');if(r)r.checked=false;_refreshContext()">\u00d7</button></div>';
+      }
     }
     document.getElementById("ctx-transcript").innerHTML = th;
     var fh = '<div class="ctx-section-title">Source Files</div>';
@@ -207,7 +209,9 @@ window._refreshContext = function () {
         (f.excluded ? ' style="color:#555"' : "") +
         ">" +
         f.path +
-        "</span></div>";
+        "</span><button class=\"row-end ctx-rm\" onclick=\"_toggleContextFile('" +
+        f.path.replace(/\x27/g, "\\'") +
+        "',true);_refreshContext()\">\u00d7</button></div>";
     }
     document.getElementById("ctx-files").innerHTML = fh;
     _updateCtxReceipt();
@@ -233,6 +237,12 @@ window._setupAutoScroll = function (id, flag) {
 };
 _setupAutoScroll("content-area", "_autoScroll");
 window._transcriptAutoScroll = window._autoScroll;
+
+(function () {
+  var ci = document.getElementById("chat-input");
+  ci.addEventListener("focus", function () { _setFocus(true); });
+  ci.addEventListener("blur", function () { _setFocus(false); });
+})();
 window._logBadge = 0;
 window._logIdx = -1;
 window._sandboxLangs = {
@@ -268,6 +278,8 @@ window.switchTab = function (name) {
       div.className = "tab-content";
     }
   }
+  var cib = document.getElementById("chat-input-bar");
+  if (cib) { cib.className = name === "chat" ? "visible" : ""; }
   if (name === "transcript") {
     window._autoScroll = true;
     document.getElementById("content-area").scrollTop =

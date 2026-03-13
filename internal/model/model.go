@@ -19,6 +19,8 @@ const (
 	HotkeyClear                            // Right+Left+Up+Down (clear conversation history)
 	HotkeySoundCheck                       // overlay-button only
 	HotkeyImplement                        // overlay-button only
+	HotkeyOptimize                         // inline button only
+	HotkeySimplify                         // inline button only
 )
 
 var KeyLabels = map[HotkeyAction]string{
@@ -26,7 +28,7 @@ var KeyLabels = map[HotkeyAction]string{
 	HotkeyAudioCapture: "←↓ audio",
 	HotkeyFollowUp:     "↑↓ mic",
 	HotkeyAudioSend:    "→↓ process",
-	HotkeyClear:        "←→↑↓ clear",
+	HotkeyClear:        "clear all",
 	HotkeySoundCheck:   "🔊 check",
 	HotkeyImplement:    "⚙ impl",
 }
@@ -48,6 +50,8 @@ var ActionNames = map[HotkeyAction]string{
 	HotkeyAudioSend:    "send",
 	HotkeySoundCheck:   "soundcheck",
 	HotkeyImplement:    "implement",
+	HotkeyOptimize:     "optimize",
+	HotkeySimplify:     "simplify",
 	HotkeyClear:        "clear",
 }
 
@@ -122,6 +126,7 @@ type Renderer interface {
 type Trace struct {
 	ID                int
 	Time              time.Time
+	ScreenIDs         []int
 	ScreenCount       int
 	ScreenTimes       []time.Time
 	HasTranscript     bool
@@ -146,12 +151,13 @@ const MaxScreenshots = 10
 
 // AppState holds accumulated inputs (screenshots, etc.) until the user triggers Process.
 type AppState struct {
-	Mu          sync.Mutex
-	Shots       []ScreenshotEntry
-	Selected    map[int]bool
-	NextID      int
-	Traces      []Trace
-	NextTraceID int
+	Mu            sync.Mutex
+	Shots         []ScreenshotEntry
+	ArchivedShots map[int]ScreenshotEntry
+	Selected      map[int]bool
+	NextID        int
+	Traces        []Trace
+	NextTraceID   int
 }
 
 func (s *AppState) AddScreenshot(data []byte) int {
@@ -175,6 +181,7 @@ func (s *AppState) RemoveScreenshot(id int) {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	delete(s.Selected, id)
+	delete(s.ArchivedShots, id)
 	for i, e := range s.Shots {
 		if e.ID == id {
 			s.Shots = append(s.Shots[:i], s.Shots[i+1:]...)
@@ -231,6 +238,18 @@ func (s *AppState) SelectedScreenshotTimes() []time.Time {
 	return times
 }
 
+func (s *AppState) SelectedScreenshotIDs() []int {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	var ids []int
+	for _, e := range s.Shots {
+		if len(s.Selected) == 0 || s.Selected[e.ID] {
+			ids = append(ids, e.ID)
+		}
+	}
+	return ids
+}
+
 func (s *AppState) ClearSelections() {
 	s.Mu.Lock()
 	s.Selected = nil
@@ -245,6 +264,7 @@ func (s *AppState) ScreenshotCount() int {
 
 func (s *AppState) ClearScreenshots() {
 	s.Mu.Lock()
+	s.archiveShots()
 	s.Shots = nil
 	s.Selected = nil
 	s.Mu.Unlock()
@@ -254,11 +274,54 @@ func (s *AppState) Clear() {
 	s.Mu.Lock()
 	s.Shots = nil
 	s.Selected = nil
+	s.ArchivedShots = nil
 	s.Traces = nil
 	s.Mu.Unlock()
 }
 
-func (s *AppState) AddTrace(screenCount int, screenTimes []time.Time, hasTranscript, hasContext bool, contextDir string, contextFiles []string, transcriptSnippet string, historyIndex int) Trace {
+func (s *AppState) archiveShots() {
+	if len(s.Shots) == 0 {
+		return
+	}
+	if s.ArchivedShots == nil {
+		s.ArchivedShots = make(map[int]ScreenshotEntry, len(s.Shots))
+	}
+	for _, e := range s.Shots {
+		s.ArchivedShots[e.ID] = e
+	}
+}
+
+func (s *AppState) GetScreenshotData(id int) []byte {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	for _, e := range s.Shots {
+		if e.ID == id {
+			return e.Data
+		}
+	}
+	if e, ok := s.ArchivedShots[id]; ok {
+		return e.Data
+	}
+	return nil
+}
+
+func (s *AppState) RestoreScreenshot(id int) *ScreenshotEntry {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	e, ok := s.ArchivedShots[id]
+	if !ok {
+		return nil
+	}
+	delete(s.ArchivedShots, id)
+	s.Shots = append(s.Shots, e)
+	if s.Selected == nil {
+		s.Selected = make(map[int]bool)
+	}
+	s.Selected[id] = true
+	return &e
+}
+
+func (s *AppState) AddTrace(screenIDs []int, screenTimes []time.Time, hasTranscript, hasContext bool, contextDir string, contextFiles []string, transcriptSnippet string, historyIndex int) Trace {
 	s.Mu.Lock()
 	defer s.Mu.Unlock()
 	id := s.NextTraceID
@@ -269,7 +332,8 @@ func (s *AppState) AddTrace(screenCount int, screenTimes []time.Time, hasTranscr
 	t := Trace{
 		ID:                id,
 		Time:              time.Now(),
-		ScreenCount:       screenCount,
+		ScreenIDs:         screenIDs,
+		ScreenCount:       len(screenIDs),
 		ScreenTimes:       screenTimes,
 		HasTranscript:     hasTranscript,
 		HasContext:         hasContext,

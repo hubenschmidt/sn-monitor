@@ -41,6 +41,13 @@ static void set_no_focus(void *gtkWindow) {
 	gtk_window_set_focus_on_map(GTK_WINDOW(gtkWindow), FALSE);
 }
 
+static void set_accept_focus(void *gtkWindow, int accept) {
+	gtk_window_set_accept_focus(GTK_WINDOW(gtkWindow), accept ? TRUE : FALSE);
+	if (accept) {
+		gtk_window_present(GTK_WINDOW(gtkWindow));
+	}
+}
+
 static void move_window(void *gtkWindow, int x, int y) {
 	gtk_window_move(GTK_WINDOW(gtkWindow), x, y);
 }
@@ -157,6 +164,7 @@ type OverlayRenderer struct {
 	onToggleScreenshot func(int, bool)
 	onRemoveScreenshot func(int)
 	onRemoveTraces     func([]int)
+	onChatMessage      func(string)
 	appState           *model.AppState
 	ac                 *audio.AudioCapture
 	provider           model.Provider
@@ -319,14 +327,38 @@ func NewOverlayRenderer() *OverlayRenderer {
 		if t == nil {
 			return
 		}
-		if t.ContextDir == "" {
+		if t.ContextDir != "" && o.provider != nil {
+			o.provider.SetContextDir(t.ContextDir)
+			appctx.CtxFileSelection.Clear()
+			o.SetFileSysLabel(t.ContextDir)
+		}
+		o.restoreTraceScreenshots(t)
+	})
+
+	w.Bind("_restoreTraceScreenshot", func(ssID int) {
+		e := o.appState.RestoreScreenshot(ssID)
+		if e == nil {
 			return
 		}
-		if o.provider != nil {
-			o.provider.SetContextDir(t.ContextDir)
+		o.AppendScreenshot(e.ID, e.Data)
+	})
+
+	w.Bind("_chatSend", func(text string) {
+		if o.onChatMessage == nil {
+			return
 		}
-		appctx.CtxFileSelection.Clear()
-		o.SetFileSysLabel(t.ContextDir)
+		if text == "" {
+			return
+		}
+		o.onChatMessage(text)
+	})
+
+	w.Bind("_setFocus", func(accept bool) {
+		v := 0
+		if accept {
+			v = 1
+		}
+		C.set_accept_focus(o.gtkWin, C.int(v))
 	})
 
 	// Bind a JS-callable function that drains pending JS updates.
@@ -485,6 +517,10 @@ func (o *OverlayRenderer) SetRemoveScreenshotHandler(fn func(int)) {
 	o.onRemoveScreenshot = fn
 }
 
+func (o *OverlayRenderer) SetChatMessageHandler(fn func(string)) {
+	o.onChatMessage = fn
+}
+
 func (o *OverlayRenderer) SetRemoveTracesHandler(fn func([]int)) {
 	o.onRemoveTraces = fn
 }
@@ -496,7 +532,7 @@ func (o *OverlayRenderer) SetAudioCapture(ac *audio.AudioCapture)  { o.ac = ac }
 func (o *OverlayRenderer) SetFileSysLabel(path string) {
 	label := filepath.Base(path)
 	o.eval(`document.getElementById('btn-context').textContent=` + jsString("file sys: "+label) + `;` +
-		`window._ctxFS=` + jsString(label) + `;_updateCtxDisplay();`)
+		`_refreshContext();`)
 }
 
 func (o *OverlayRenderer) MoveToMonitor(x, y int) {
@@ -561,7 +597,8 @@ func (o *OverlayRenderer) StreamStart() {
 	o.streamBuf.Reset()
 	js := "window._autoScroll=true;" +
 		"document.getElementById('chat-content').innerHTML='<pre id=\"stream\"></pre>';" +
-		"document.getElementById('footer-status').textContent='';"
+		"document.getElementById('footer-status').textContent='';" +
+		"document.getElementById('tab-chat').classList.add('streaming');"
 	o.eval(js)
 }
 
@@ -579,7 +616,11 @@ func (o *OverlayRenderer) wrapResponse() string {
 		html = "<pre>" + escapeHTML(o.streamBuf.String()) + "</pre>"
 	}
 	inner := `<div class="response-block">` + html +
-		`<button class="explain-btn" onclick="_action('explain')" title="Explain further">?</button></div>`
+		`<div class="response-actions">` +
+		`<button class="action-btn simplify-btn" onclick="_action('simplify')" title="Simplify">&#8722;</button>` +
+		`<button class="action-btn optimize-btn" onclick="_action('optimize')" title="Optimize">&#43;</button>` +
+		`<button class="action-btn explain-btn" onclick="_action('explain')" title="Explain further">?</button>` +
+		`</div></div>`
 	tid := o.currentTraceID
 	return fmt.Sprintf(
 		`<div class="trace-group" data-trace-id="%d">`+
@@ -593,7 +634,8 @@ func (o *OverlayRenderer) StreamDone() {
 	wrapped := o.wrapResponse()
 	js := "var c=document.getElementById('chat-content'),ca=document.getElementById('content-area'),st=ca.scrollTop;" +
 		"c.innerHTML=" + jsString(wrapped) + ";_injectSandboxButtons();" +
-		"if(!window._autoScroll)ca.scrollTop=st;"
+		"if(!window._autoScroll)ca.scrollTop=st;" +
+		"document.getElementById('tab-chat').classList.remove('streaming');"
 	o.eval(js)
 }
 
@@ -602,7 +644,8 @@ func (o *OverlayRenderer) AppendStreamStart() {
 	js := `window._autoScroll=true;var c=document.getElementById('chat-content');` +
 		`c.innerHTML+='<hr><h3 style="color:#7ec8e3">▼ follow-up</h3><pre id="stream"></pre>';` +
 		`document.getElementById('footer-status').textContent='';` +
-		`document.getElementById('content-area').scrollTop=document.getElementById('content-area').scrollHeight;`
+		`document.getElementById('content-area').scrollTop=document.getElementById('content-area').scrollHeight;` +
+		`document.getElementById('tab-chat').classList.add('streaming');`
 	o.eval(js)
 }
 
@@ -613,7 +656,8 @@ func (o *OverlayRenderer) AppendStreamDone() {
 	js := `var s=document.getElementById('stream');` +
 		`if(s){var ca=document.getElementById('content-area'),st=ca.scrollTop;` +
 		`var d=document.createElement('div');d.innerHTML=` + jsString(wrapped) + `;s.replaceWith(d);` +
-		`if(window._autoScroll)d.scrollIntoView(false);else ca.scrollTop=st;}_injectSandboxButtons();`
+		`if(window._autoScroll)d.scrollIntoView(false);else ca.scrollTop=st;}_injectSandboxButtons();` +
+		`document.getElementById('tab-chat').classList.remove('streaming');`
 	o.eval(js)
 }
 
@@ -625,14 +669,12 @@ func (o *OverlayRenderer) AppendTranscriptChunk(source, text string, id int) {
 			`<input type="checkbox" class="row-ctrl chunk-cb" onchange="_toggleChunk(%d,this.checked)">`+
 			`<span class="ts">[%s</span> <span class="src %s">%s</span><span class="ts">]</span> %s</div>`,
 		id, id, escapeHTML(ts), srcClass, escapeHTML(source), escapeHTML(text))
-	counterKey := "_ctxAudio"
-	if source == "mic" {
-		counterKey = "_ctxMic"
-	}
 	js := `var t=document.getElementById('transcript-content');` +
 		`t.innerHTML+=` + jsString(chunk) + `;` +
 		`if(window._autoScroll){var ca=document.getElementById('content-area');ca.scrollTop=ca.scrollHeight;}` +
-		`window.` + counterKey + `=(window.` + counterKey + `||0)+` + fmt.Sprintf("%d", len(text)) + `;_updateCtxDisplay();`
+		`_refreshContext();` +
+		`var tb=document.getElementById('tab-transcript');tb.classList.add('streaming');` +
+		`clearTimeout(window._txPulse);window._txPulse=setTimeout(function(){tb.classList.remove('streaming');},2000);`
 	o.eval(js)
 }
 
@@ -691,12 +733,24 @@ func (o *OverlayRenderer) AppendScreenshot(id int, data []byte) {
 			`<span class="ss-ts">%s</span></div>`,
 		id, id, id, b64, escapeHTML(ts))
 	js := `var g=document.getElementById('screenshot-grid');` +
-		`g.innerHTML+=` + jsString(html) + `;`
+		`g.innerHTML+=` + jsString(html) + `;_refreshContext();` +
+		`var sb=document.getElementById('tab-screenshots');sb.classList.add('streaming');` +
+		`clearTimeout(window._ssPulse);window._ssPulse=setTimeout(function(){sb.classList.remove('streaming');},2000);`
 	o.eval(js)
 }
 
+func (o *OverlayRenderer) restoreTraceScreenshots(t *model.Trace) {
+	for _, ssID := range t.ScreenIDs {
+		e := o.appState.RestoreScreenshot(ssID)
+		if e == nil {
+			continue
+		}
+		o.AppendScreenshot(e.ID, e.Data)
+	}
+}
+
 func (o *OverlayRenderer) RemoveScreenshot(id int) {
-	js := fmt.Sprintf(`var el=document.querySelector('.ss-entry[data-id="%d"]');if(el)el.remove();`, id)
+	js := fmt.Sprintf(`var el=document.querySelector('.ss-entry[data-id="%d"]');if(el)el.remove();_refreshContext();`, id)
 	o.eval(js)
 }
 
@@ -705,7 +759,7 @@ func (o *OverlayRenderer) ClearScreenshotCheckboxes() {
 }
 
 func (o *OverlayRenderer) SetScreenCount(count int) {
-	o.eval(fmt.Sprintf("window._ctxScreenCount=%d;_updateCtxDisplay();", count))
+	o.eval(`_refreshContext();`)
 }
 
 func (o *OverlayRenderer) SetCurrentTraceID(id int) {
@@ -726,12 +780,19 @@ func (o *OverlayRenderer) AddObserveTrace(trace model.Trace) {
 	}
 	summary := strings.Join(parts, ", ")
 	detail := ""
-	if len(trace.ScreenTimes) > 0 {
-		var sts []string
-		for _, st := range trace.ScreenTimes {
-			sts = append(sts, st.Format("15:04:05"))
+	if len(trace.ScreenIDs) > 0 {
+		detail += "<div><b>Screenshots:</b></div>"
+		for i, ssID := range trace.ScreenIDs {
+			ts := ""
+			if i < len(trace.ScreenTimes) {
+				ts = trace.ScreenTimes[i].Format("15:04:05")
+			}
+			detail += fmt.Sprintf(
+				`<div class="row row-center" style="padding-left:8px">`+
+					`<span class="row-fill" style="color:#aaa">#%d [%s]</span>`+
+					`<button class="row-end trace-restore" onclick="event.stopPropagation();_restoreTraceScreenshot(%d)" title="Restore screenshot">&#8635;</button>`+
+					`</div>`, ssID, escapeHTML(ts), ssID)
 		}
-		detail += "<div><b>Screenshots:</b> " + escapeHTML(strings.Join(sts, ", ")) + "</div>"
 	}
 	if trace.HasContext {
 		info, err := os.Stat(trace.ContextDir)
@@ -744,12 +805,9 @@ func (o *OverlayRenderer) AddObserveTrace(trace model.Trace) {
 	if trace.TranscriptSnippet != "" {
 		detail += "<div><b>Transcript:</b></div><pre style=\"font-size:11px;color:#aaa;margin:2px 0;white-space:pre-wrap\">" + escapeHTML(trace.TranscriptSnippet) + "</pre>"
 	}
-	restoreBtn := ""
-	if trace.HasContext && trace.ContextDir != "" {
-		restoreBtn = fmt.Sprintf(
-			` <button class="row-end trace-restore" onclick="event.stopPropagation();_restoreArtifactContext(%d)" title="Restore file context">&#8635;</button>`,
-			trace.ID)
-	}
+	restoreBtn := fmt.Sprintf(
+		` <button class="row-end trace-restore" onclick="event.stopPropagation();_restoreArtifactContext(%d)" title="Restore all context">&#8635;</button>`,
+		trace.ID)
 	html := fmt.Sprintf(
 		`<div class="observe-trace" data-trace-id="%d">`+
 			`<div class="row row-center observe-header" onclick="_toggleObserveTrace(%d)">`+
@@ -781,15 +839,13 @@ func (o *OverlayRenderer) Clear() {
 		"document.getElementById('ctx-screenshots').innerHTML='';" +
 		"document.getElementById('ctx-transcript').innerHTML='';" +
 		"document.getElementById('ctx-files').innerHTML='';" +
-		"document.getElementById('footer-status').textContent='Cleared.';" +
-		"window._ctxScreenCount=0;window._ctxAudio=0;window._ctxMic=0;_updateCtxDisplay();"
+		"document.getElementById('footer-status').textContent='Cleared.';"
 	o.eval(js)
 }
 
 func (o *OverlayRenderer) ClearContextData() {
 	o.eval(`document.getElementById('screenshot-grid').innerHTML='';` +
-		`document.getElementById('transcript-content').innerHTML='';` +
-		`window._ctxScreenCount=0;window._ctxAudio=0;window._ctxMic=0;_updateCtxDisplay();`)
+		`document.getElementById('transcript-content').innerHTML='';`)
 }
 
 func (o *OverlayRenderer) Close() {
@@ -916,8 +972,9 @@ func (o *OverlayRenderer) buildHTML() string {
   <button id="tab-log" onclick="switchTab('log')">Log</button>
 </div>
 <div id="content-area">
-<div id="chat-content" class="tab-content active"></div>
-<div id="transcript-content" class="tab-content"></div>
+<div id="chat-content" class="tab-content active"><div style="text-align:right;padding:4px 8px"><button class="ctx-clear-btn" onclick="document.getElementById('chat-content').querySelectorAll('.trace-group').forEach(function(e){e.remove()})">Clear Chat</button></div></div>
+<div id="chat-input-bar" class="visible"><input id="chat-input" type="text" placeholder="Send a message..." onkeydown="if(event.key==='Enter'){_chatSend(this.value);this.value=''}"><button id="chat-send-btn" onclick="_chatSend(document.getElementById('chat-input').value);document.getElementById('chat-input').value=''">Send</button></div>
+<div id="transcript-content" class="tab-content"><div id="transcript-controls" style="text-align:right;padding:4px 8px"><button class="ctx-clear-btn" style="color:#7ec8e3;border-color:rgba(126,200,227,0.3)" onclick="_selectAllTranscript()">Select All</button></div></div>
 <div id="screenshots-content" class="tab-content"><div id="screenshot-grid"></div></div>
 <div id="sandbox-content" class="tab-content">
   <div class="editor-wrap">
@@ -938,6 +995,7 @@ func (o *OverlayRenderer) buildHTML() string {
 </div>
 <div id="context-content" class="tab-content">
   <div id="ctx-active">
+    <div style="text-align:right;padding:4px 8px"><button class="ctx-clear-btn" onclick="_action('clear');_refreshContext()">Clear All</button></div>
     <div id="ctx-screenshots"></div>
     <div id="ctx-transcript"></div>
     <div id="ctx-files"></div>
@@ -948,7 +1006,7 @@ func (o *OverlayRenderer) buildHTML() string {
 <button id="delete-traces-btn" style="display:none" onclick="_deleteTraces()">Delete selected</button>
 <div id="ss-lightbox" onclick="this.classList.remove('active')"><img></div>
 </div>
-<div id="footer"><div id="context-info"></div><div id="footer-status"></div>
+<div id="footer"><div id="footer-status"></div>
 <div id="vu-meters">
   <span class="vu-label">mic</span>
   <div class="vu-track"><div id="vu-mic" class="vu-fill"></div></div>
